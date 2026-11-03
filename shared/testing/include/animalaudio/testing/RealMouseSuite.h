@@ -97,6 +97,20 @@ struct DesktopEditor
         return window->getLocalPoint(&component, point) * juce::Desktop::getInstance().getGlobalScaleFactor();
     }
 
+    /** Moves the window so `peerPosition` is on a display. macOS drops clicks at points outside every display
+        (NSViewComponentPeer::contains -> isWindowAtPoint), and a 2x editor is wider than a CI runner's 1024 px screen. */
+    void keepOnScreen(juce::Point<float> peerPosition)
+    {
+        const auto screen = juce::Desktop::getInstance().getDisplays().getTotalBounds(true).toFloat().reduced(20.0f);
+        const auto point =
+            window->localPointToGlobal(peerPosition / juce::Desktop::getInstance().getGlobalScaleFactor());
+        const auto onScreen = screen.getConstrainedPoint(point);
+        if (onScreen == point)
+            return;
+        window->setTopLeftPosition(window->getPosition() + (onScreen - point).roundToInt());
+        pump(50);
+    }
+
     void send(juce::Point<float> peerPosition, bool leftDown)
     {
         if (osPointerFollows)
@@ -117,6 +131,7 @@ struct DesktopEditor
         `osPointerFollows = false`. */
     void click(juce::Point<float> peerPosition, const std::function<void()>& duringPress = {})
     {
+        keepOnScreen(peerPosition);
         send(peerPosition, false);
         send(peerPosition, true);
         if (duringPress)
