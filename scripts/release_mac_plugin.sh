@@ -11,6 +11,8 @@ repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$repo_root"
 # shellcheck source=lib/mac_signing_identities.sh
 source "$repo_root/scripts/lib/mac_signing_identities.sh"
+# shellcheck source=lib/mac_staple.sh
+source "$repo_root/scripts/lib/mac_staple.sh"
 
 eval "$(PLUGIN="$plugin" python3 - <<'PY'
 import os, shlex, sys
@@ -93,7 +95,7 @@ xcrun notarytool submit "$submit_zip" \
   --wait
 
 echo "== staple"
-xcrun stapler staple "$bundle"
+mac_staple "$bundle"
 
 echo "== spctl verify"
 spctl -a -vv -t install "$bundle"
