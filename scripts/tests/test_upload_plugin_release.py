@@ -67,7 +67,7 @@ class UploadPluginReleaseTests(unittest.TestCase):
                 )
 
         self.assertEqual(code, 0)
-        commands = [line for line in out.getvalue().splitlines() if line.startswith("$ npx supabase storage")]
+        commands = [line for line in out.getvalue().splitlines() if line.startswith("$ npx supabase@^2.121.0 storage")]
         dst = f"ss:///plugin-releases/duck/1.0.1/{artifact.name}"
         self.assertEqual(len(commands), 2)
         self.assertIn(" storage rm ", commands[0])

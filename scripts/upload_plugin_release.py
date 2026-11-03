@@ -20,6 +20,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_WEB_REPO = Path(os.environ.get("AA_WEB_REPO", str(ROOT.parent / "animal-audio-web")))
+# Pinned like animal-audio-web's devDependency: CI has no node_modules there, so a bare `npx supabase` pulls the
+# latest major (3.x requires --yes for every remote write and broke publishing).
+SUPABASE = ["npx", "supabase@^2.121.0"]
 
 
 @dataclass
@@ -80,8 +83,8 @@ def ensure_supabase_linked(web_repo: Path, *, dry_run: bool) -> None:
     if not token or dry_run:
         return
     ref = os.environ.get("AA_SUPABASE_PROJECT_REF", "huivhdradgroykfvtclx")
-    run(["npx", "supabase", "login", "--token", token], cwd=web_repo, dry_run=False)
-    link = ["npx", "supabase", "link", "--project-ref", ref, "--yes"]
+    run([*SUPABASE, "login", "--token", token], cwd=web_repo, dry_run=False)
+    link = [*SUPABASE, "link", "--project-ref", ref, "--yes"]
     db_password = os.environ.get("AA_SUPABASE_DB_PASSWORD")
     if db_password:
         link.extend(["--password", db_password])
@@ -143,14 +146,13 @@ def main(argv: list[str] | None = None) -> int:
     # `storage cp` cannot overwrite (409 KeyAlreadyExists), and re-running a release for the same version
     # must work (rebuilt/re-signed artifact). `storage rm` exits 0 when the object does not exist.
     run(
-        ["npx", "supabase", "storage", "rm", "--experimental", "--linked", "--yes", storage_dst],
+        [*SUPABASE, "storage", "rm", "--experimental", "--linked", "--yes", storage_dst],
         cwd=web_repo,
         dry_run=args.dry_run,
     )
     run(
         [
-            "npx",
-            "supabase",
+            *SUPABASE,
             "storage",
             "cp",
             "--experimental",
@@ -166,7 +168,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     query = sql_publish(manifest)
-    run(["npx", "supabase", "db", "query", "--linked", query], cwd=web_repo, dry_run=args.dry_run)
+    run([*SUPABASE, "db", "query", "--linked", "--yes", query], cwd=web_repo, dry_run=args.dry_run)
 
     print(f"\nUploaded {manifest.file_name} -> plugin-releases/{manifest.storage_path}")
     print(f"Published plugin_releases ({manifest.plugin_slug}, {manifest.platform}): "
