@@ -11,8 +11,8 @@ if [ -z "$token" ]; then
   exit 0
 fi
 cd "$web_repo"
-npx supabase login --token "$token"
-link=(npx supabase link --project-ref "$ref" --yes)
+npx supabase@^2.121.0 login --token "$token"
+link=(npx supabase@^2.121.0 link --project-ref "$ref" --yes)
 if [ -n "${AA_SUPABASE_DB_PASSWORD:-}" ]; then
   link+=(--password "$AA_SUPABASE_DB_PASSWORD")
 fi
