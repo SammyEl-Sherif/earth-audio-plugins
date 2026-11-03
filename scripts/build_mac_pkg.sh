@@ -70,6 +70,8 @@ fi
 
 # shellcheck source=lib/mac_signing_identities.sh
 source "$repo_root/scripts/lib/mac_signing_identities.sh"
+# shellcheck source=lib/mac_staple.sh
+source "$repo_root/scripts/lib/mac_staple.sh"
 for var in AA_CODESIGN_IDENTITY AA_NOTARY_KEY AA_NOTARY_KEY_ID AA_NOTARY_ISSUER; do
   if [ -z "${!var:-}" ]; then
     echo "Missing env: $var" >&2
@@ -141,7 +143,7 @@ xcrun notarytool submit "$signed" \
   --wait
 
 echo "== staple pkg"
-xcrun stapler staple "$signed"
+mac_staple "$signed"
 
 echo "== spctl verify pkg"
 spctl -a -vv -t install "$signed"
