@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.22)
 
+# Must precede project(), or it is ignored and binaries require the build machine's macOS.
+set(CMAKE_OSX_DEPLOYMENT_TARGET "10.13" CACHE STRING "Minimum macOS version")
+
 project(AnimalAudio VERSION 0.0.0 LANGUAGES C CXX
     DESCRIPTION "Animal Audio monorepo (per-plugin semver in plugins/<name>/VERSION)")
 
@@ -8,7 +11,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-set(CMAKE_OSX_DEPLOYMENT_TARGET "10.13" CACHE STRING "Minimum macOS version")
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
 option(AA_BUILD_TESTS "Build unit tests (Catch2)" ON)
