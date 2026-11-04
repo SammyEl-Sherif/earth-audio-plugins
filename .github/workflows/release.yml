@@ -17,6 +17,7 @@ on:
         required: true
         default: duck
         options: # plugin-slugs
+          - cosmos
           - duck
           - parrot
           - turtletime

@@ -97,6 +97,14 @@ struct TransportInfo
     double ppq = 0.0;
 };
 
+/** The host tempo when it reports a usable one, otherwise `fallback`. */
+inline double bpmOr(const TransportInfo& transport, double fallback) noexcept
+{
+    if (transport.hasBpm && transport.bpm > 1.0 && std::isfinite(transport.bpm))
+        return transport.bpm;
+    return fallback;
+}
+
 enum class SyncSource
 {
     Host,   // locked to the host playhead

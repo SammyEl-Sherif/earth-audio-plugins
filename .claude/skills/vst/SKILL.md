@@ -87,6 +87,10 @@ Open this table and decide, for every piece the concept needs, whether it alread
 | band-limited fractional reads / resampling, FIR design | `dsp/WindowedSinc.h` `SincReader`, `designLowpass` |
 | 4x oversampling for nonlinear stages | `dsp/Oversampler.h` `Oversampler4x` |
 | tube saturation / drive | `dsp/TubeDrive.h` (two 12AX7 stages, level-matched, clean at 0) |
+| cubic interpolation for fractional buffer reads | `dsp/Interpolation.h` `catmullRom` |
+| resonant filter (low/band/high, modulation-safe) | `dsp/Svf.h` `Svf` |
+| stereo reverb (RT60 decay, damping) | `dsp/FdnReverb.h` `FdnReverb` |
+| host tempo with a fallback | `dsp/TempoSync.h` `bpmOr` |
 | test suites | `shared/testing`: `AA_SHAPER_PLUGIN_TESTS`, `AA_GAIN_SHAPER_PLUGIN_TESTS` |
 | numeric DSP test helpers (tone amplitude, peak frequency, cents) | `shared/testing`: `SignalProbe.h` |
 

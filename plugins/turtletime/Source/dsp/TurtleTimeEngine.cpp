@@ -1,5 +1,7 @@
 #include "TurtleTimeEngine.h"
 
+#include <animalaudio/dsp/Interpolation.h>
+
 #include <algorithm>
 #include <cmath>
 
@@ -38,21 +40,7 @@ int wrapIndex(int index, int size) noexcept
     return wrapped;
 }
 
-/** 4-point cubic (Catmull-Rom). Reproduces linear ramps, so half-speed stays in tune without a harsh image. */
-float catmullRom(float y0, float y1, float y2, float y3, float t) noexcept
-{
-    const float t2 = t * t;
-    const float t3 = t2 * t;
-    return 0.5f * ((2.0f * y1) + (-y0 + y2) * t + (2.0f * y0 - 5.0f * y1 + 4.0f * y2 - y3) * t2 +
-                   (-y0 + 3.0f * y1 - 3.0f * y2 + y3) * t3);
-}
-
-double hostBpm(const animalaudio::dsp::TransportInfo& transport) noexcept
-{
-    if (transport.hasBpm && transport.bpm > 1.0 && std::isfinite(transport.bpm))
-        return transport.bpm;
-    return 120.0;
-}
+using animalaudio::dsp::catmullRom;
 
 void markersFor(const TimePattern& pattern, double ppq, float& play, float& marker) noexcept
 {
@@ -330,7 +318,7 @@ void TurtleTimeEngine::process(float* const* channels, int numChannels, int numS
         holding = false;
     }
 
-    const double bpm = hostBpm(transport);
+    const double bpm = animalaudio::dsp::bpmOr(transport, 120.0);
     const double beatsPerSample = bpm / (60.0 * sampleRate);
     const double blockStart = transport.ppq;
     const double windowBeats = pattern.windowBeats > 1.0e-6 ? pattern.windowBeats : 1.0;

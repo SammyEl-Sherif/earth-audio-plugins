@@ -7,10 +7,13 @@ target_compile_features(animalaudio_dsp INTERFACE cxx_std_17)
 if(AA_BUILD_TESTS)
     add_executable(animalaudio_dsp_tests
         tests/CurveGainShaperTests.cpp
+        tests/FdnReverbTests.cpp
+        tests/InterpolationTests.cpp
         tests/OversamplerTests.cpp
         tests/PitchTrackerTests.cpp
         tests/ShapeCurveTests.cpp
         tests/StandardPresetsTests.cpp
+        tests/SvfTests.cpp
         tests/SmoothingTests.cpp
         tests/TempoSyncTests.cpp
         tests/TubeDriveTests.cpp)

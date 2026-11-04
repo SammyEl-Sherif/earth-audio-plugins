@@ -1,0 +1,17 @@
+{
+  "code": "AA-004",
+  "name": "COSMOS",
+  "category": "Granular looper",
+  "blurb": "Chops what you play into grains and turns them into loops, clouds, glitches and echoes.",
+  "longDescription": "Eleven granular and looping effects with four variations each, locked to your tempo. Freeze a moment with HOLD, layer a 60-second phrase loop, and wash it all through a resonant filter and reverb.",
+  "highlights": [
+    "11 effects x 4 variations",
+    "HOLD freeze + 60 s looper",
+    "Tempo-synced grains and reverb"
+  ],
+  "accent": "#52e5f2",
+  "surface": "#0e1120",
+  "initialAccess": [
+    "admin"
+  ]
+}
