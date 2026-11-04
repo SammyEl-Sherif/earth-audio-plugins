@@ -7,7 +7,8 @@ on:
   workflow_call:
     inputs:
       plugins:
-        description: JSON list of plugin slugs (default every plugin plus the new-plugin scaffold check)
+        description: JSON list of plugin slugs (default every plugin, plus the new-plugin scaffold check when what it
+          depends on changed)
         type: string
         default: ''
       versions:
@@ -46,12 +47,25 @@ jobs:
       plugins: ${{ steps.list.outputs.plugins }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - id: list
         env:
           PLUGINS: ${{ inputs.plugins }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        # The scaffold check (~8 min, always a cold build) only proves templates/plugin still generates and builds,
+        # so it runs when something the scaffold is made of changed (or when there is no PR base to diff against).
         run: |
           if [ -z "$PLUGINS" ]; then
-            PLUGINS=$(python3 -c "import json,sys; sys.path.insert(0,'scripts'); from lib.plugin_release import list_plugin_slugs; print(json.dumps(list_plugin_slugs() + ['scaffoldcheck']))")
+            scaffold=true
+            if [ -n "$BASE_SHA" ] && git cat-file -e "$BASE_SHA" 2>/dev/null; then
+              changed=$(git diff --name-only "$BASE_SHA" HEAD)
+              echo "$changed"
+              if ! echo "$changed" | grep -qE '^(templates/|shared/|cmake/|CMakeLists\.txt$|scripts/new_plugin\.py$|scripts/lib/|\.github/workflows/build\.yml$|\.github/actions/)'; then
+                scaffold=false
+              fi
+            fi
+            PLUGINS=$(SCAFFOLD="$scaffold" python3 -c "import json,os,sys; sys.path.insert(0,'scripts'); from lib.plugin_release import list_plugin_slugs; print(json.dumps(list_plugin_slugs() + (['scaffoldcheck'] if os.environ['SCAFFOLD'] == 'true' else [])))")
           fi
           echo "plugins=$PLUGINS" >> "$GITHUB_OUTPUT"
 
@@ -114,10 +128,15 @@ jobs:
       - name: Build (VST3 + tests)
         run: cmake --build build
 
+      # The scaffold is Duck's shared processor + editor; Duck's job already runs the real-mouse suite and pluginval
+      # on that code, so the scaffold check keeps only the fast tests.
       - name: Test
-        run: ctest --test-dir build --output-on-failure --parallel 3
+        env:
+          EXCLUDE: ${{ matrix.plugin == 'scaffoldcheck' && 'real mouse' || '' }}
+        run: ctest --test-dir build --output-on-failure --parallel 3 ${EXCLUDE:+--exclude-regex "$EXCLUDE"}
 
       - name: pluginval (strictness 10)
+        if: matrix.plugin != 'scaffoldcheck'
         env:
           BUNDLE: ${{ steps.meta.outputs.bundle_path }}
         run: |
