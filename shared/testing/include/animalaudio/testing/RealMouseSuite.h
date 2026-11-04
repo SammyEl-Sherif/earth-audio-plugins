@@ -170,6 +170,25 @@ inline std::vector<Scenario> scenarios()
             {K::EditorScale, 2.0f}, {K::DesktopScale, 1.5f}, {K::DesktopScale, 2.0f}};
 }
 
+/** The unscaled scenario runs every combination. Scaling only moves where events land (hit-testing, transforms,
+    the polled OS pointer), not which pill a hit selects, so scaled scenarios click each pill once from a different
+    selection and probe both edges: same coverage of the coordinate paths for a fraction of the clicks. */
+inline bool exhaustive(const Scenario& s)
+{
+    return s.kind == ScaleKind::None;
+}
+
+/** (from, to) pairs: all 16 for the exhaustive scenario, otherwise each pill once, never from itself. */
+inline std::vector<std::pair<int, int>> transitions(const Scenario& s)
+{
+    std::vector<std::pair<int, int>> pairs;
+    for (int from = 0; from < dsp::kNumDivisions; ++from)
+        for (int to = 0; to < dsp::kNumDivisions; ++to)
+            if (exhaustive(s) || to == (from + 1) % dsp::kNumDivisions)
+                pairs.emplace_back(from, to);
+    return pairs;
+}
+
 inline juce::String describe(const Scenario& s)
 {
     using K = ScaleKind;
@@ -278,7 +297,8 @@ void clickingPaintedCentreSelectsThatDivision()
 
         requireSelectionEverywhere(processor.apvts, editor, 1); // default 1/4
 
-        const std::vector<int> order = {0, 1, 2, 3, 3, 2, 1, 0, 2, 0, 3, 1, 1, 2};
+        const std::vector<int> order = exhaustive(scenario) ? std::vector<int>{0, 1, 2, 3, 3, 2, 1, 0, 2, 0, 3, 1, 1, 2}
+                                                            : std::vector<int>{0, 3, 3, 2};
         for (int target : order)
         {
             INFO("clicking pill " << target);
@@ -288,19 +308,16 @@ void clickingPaintedCentreSelectsThatDivision()
             REQUIRE(dspProbe.divisionInUse() == target);
         }
 
-        // every starting selection x every target
-        for (int from = 0; from < dsp::kNumDivisions; ++from)
+        // every starting selection x every target (unscaled); each pill from another selection (scaled)
+        for (const auto& [from, to] : transitions(scenario))
         {
-            for (int to = 0; to < dsp::kNumDivisions; ++to)
-            {
-                setDivisionFromHost(processor.apvts, from);
-                pump();
-                window.clickCentreOf(editor.getDivisionButton(to));
-                window.parkMouse();
-                INFO("from " << from << " to " << to);
-                requireSelectionEverywhere(processor.apvts, editor, to);
-                REQUIRE(dspProbe.divisionInUse() == to);
-            }
+            setDivisionFromHost(processor.apvts, from);
+            pump();
+            window.clickCentreOf(editor.getDivisionButton(to));
+            window.parkMouse();
+            INFO("from " << from << " to " << to);
+            requireSelectionEverywhere(processor.apvts, editor, to);
+            REQUIRE(dspProbe.divisionInUse() == to);
         }
     }
 }
@@ -324,7 +341,10 @@ void clickingAnywhereOnAPillSelectsIt()
         {
             auto& pill = editor.getDivisionButton(target);
             const auto b = pill.getLocalBounds().toFloat();
-            for (float fx : {0.12f, 0.3f, 0.5f, 0.7f, 0.88f})
+            // scaled: the caps, where rounding of transformed coordinates would miss first
+            const auto fractions = exhaustive(scenario) ? std::vector<float>{0.12f, 0.3f, 0.5f, 0.7f, 0.88f}
+                                                        : std::vector<float>{0.12f, 0.88f};
+            for (float fx : fractions)
             {
                 setDivisionFromHost(processor.apvts, (target + 2) % dsp::kNumDivisions);
                 pump();
@@ -366,6 +386,9 @@ void selectedPillAndBothNeighbours()
         {
             for (int offset : {0, -1, +1})
             {
+                // the unscaled case is all in clickingPaintedCentreSelectsThatDivision's full matrix
+                if (exhaustive(scenario))
+                    break;
                 const int clicked = selected + offset;
                 if (clicked < 0 || clicked >= dsp::kNumDivisions)
                     continue;
@@ -405,26 +428,23 @@ void clickDoesNotDependOnPolledPointerState()
         putOsPointerAt({2.0f, 2.0f});
         pump();
 
-        for (int from = 0; from < dsp::kNumDivisions; ++from)
+        for (const auto& [from, to] : transitions(scenario))
         {
-            for (int to = 0; to < dsp::kNumDivisions; ++to)
-            {
-                INFO("from " << from << " to " << to);
-                setDivisionFromHost(processor.apvts, from);
-                pump();
-                auto& pill = editor.getDivisionButton(to);
+            INFO("from " << from << " to " << to);
+            setDivisionFromHost(processor.apvts, from);
+            pump();
+            auto& pill = editor.getDivisionButton(to);
 
-                window.click(window.peerPositionOf(pill, pill.getLocalBounds().toFloat().getCentre()),
-                             [&]
-                             {
-                                 // keyboard focus moving mid-click makes JUCE buttons re-read the OS pointer
-                                 editor.getDivisionButton((to + 1) % dsp::kNumDivisions).grabKeyboardFocus();
-                                 pill.grabKeyboardFocus();
-                             });
-                window.parkMouse();
-                requireSelectionEverywhere(processor.apvts, editor, to);
-                REQUIRE(dspProbe.divisionInUse() == to);
-            }
+            window.click(window.peerPositionOf(pill, pill.getLocalBounds().toFloat().getCentre()),
+                         [&]
+                         {
+                             // keyboard focus moving mid-click makes JUCE buttons re-read the OS pointer
+                             editor.getDivisionButton((to + 1) % dsp::kNumDivisions).grabKeyboardFocus();
+                             pill.grabKeyboardFocus();
+                         });
+            window.parkMouse();
+            requireSelectionEverywhere(processor.apvts, editor, to);
+            REQUIRE(dspProbe.divisionInUse() == to);
         }
     }
 }
@@ -439,6 +459,9 @@ void highlightFollowsHostSidePaths()
 
     for (const auto& scenario : scenarios())
     {
+        // host-side paths do not depend on where clicks land: unscaled, plus one scaled editor for the repaint
+        if (!exhaustive(scenario) && !(scenario.kind == ScaleKind::EditorScale && scenario.scale == 2.0f))
+            continue;
         INFO(describe(scenario).toStdString());
         P processor;
         DspProbe<P> dspProbe(processor);

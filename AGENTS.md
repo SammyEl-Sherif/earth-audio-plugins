@@ -120,13 +120,18 @@ scripts/verify_plugin.sh Duck                               # build + ctest + sc
   `AA_REAL_MOUSE_PLUGIN_TESTS`) puts the editor in a native window and injects events through `ComponentPeer`, at several
   editor/desktop scales; it needs a display, so run ctest as `xvfb-run -a ctest ...` on Linux (it skips without one) and
   keep those tests serial (`RESOURCE_LOCK native_display` in each plugin's `catch_discover_tests`): they move the
-  real OS pointer, so two at once on one X server fight over it.
+  real OS pointer, so two at once on one X server fight over it (locally: don't touch the mouse while they run). Every
+  combination of selection and target runs unscaled (`exhaustive()`); scaled scenarios click each pill once from another
+  selection and probe both caps, since scaling moves where events land, not which pill a hit selects.
 - Screenshots for the README: `AA_SCREENSHOT_DIR=docs/images ./build/plugins/duck/DuckTests "duck: editor renders headlessly"`.
   Regenerate and commit them whenever the Duck UI changes visibly.
 - Plugin validation: [pluginval](https://github.com/Tracktion/pluginval) (`xvfb-run -a pluginval --strictness-level 10 --validate-in-process <bundle>.vst3`);
   CI runs level 10 on macOS for every plugin. Duck passes level 10 (incl. editor, automation, state restore).
-- Scaffold check: CI's `scaffold` job runs `new_plugin.py` for a throwaway plugin and builds + tests it, so
-  `templates/plugin` can never ship a red starter. Changing the template? Run the same locally in a git worktree.
+- Scaffold check: CI's `scaffoldcheck` job runs `new_plugin.py` for a throwaway plugin and builds + tests it, so
+  `templates/plugin` can never ship a red starter. It runs only when the PR touches what a scaffold is made of
+  (`templates/`, `shared/`, `cmake/`, root `CMakeLists.txt`, `scripts/new_plugin.py`, `scripts/lib/`, `build.yml`,
+  `.github/actions/`), and skips the real-mouse suite and pluginval, which Duck's job runs on the same shared code.
+  Changing the template? Run the same locally in a git worktree.
 - Format: `scripts/format.sh` (CI checks `clang-format --dry-run --Werror` on all `*.h`/`*.cpp`).
 - Script checks: `scripts/check_repo.sh` runs `bash -n` on `scripts/*.sh`, `py_compile` on the Python scripts, the
   install-script unit tests and, when `pwsh` exists (CI), the PowerShell parser on `scripts/*.ps1`.
