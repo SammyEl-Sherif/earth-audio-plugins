@@ -48,6 +48,7 @@ and [AGENTS.md](AGENTS.md).
 | **Duck** | Tempo-synced volume ducking with a draggable curve editor, 16 preset shapes and a big MIX knob | `plugins/duck` | Alpha: builds as VST3, all tests pass, passes pluginval level 10 on Linux; not yet tried in a real DAW |
 | **Turtle Time** | Tempo-synced half-time, reverse, and beat repeat | `plugins/turtletime` | Private beta (0.1.0): VST3 builds, plugin tests pass, passes pluginval level 10 on macOS; loaded in Ableton Live on macOS |
 | **Parrot** | Pitch and formant voice bender with snap, robot and tube drive | `plugins/parrot` | Alpha (0.1.0): VST3 builds, plugin tests pass, passes pluginval level 10 on macOS; not yet tried in a DAW |
+| **Cosmos** | Granular looper: micro loops, granules, glitch and multidelay with hold, phrase looper and reverb | `plugins/cosmos` | Alpha (0.1.0): VST3 builds, plugin tests pass, passes pluginval level 10 on macOS; not yet tried in a DAW |
 <!-- PLUGINS:END -->
 
 More animals are on the way. Adding one takes a single command (or the `/vst` agent skill), see [Adding a plugin](#adding-a-plugin).
@@ -138,6 +139,37 @@ hold it on one robot note, then push it through a modelled tube preamp.
 
 > Screenshot from `AA_SCREENSHOT_DIR=docs/images ./build/plugins/parrot/ParrotTests "parrot: editor renders headlessly"`.
 
+## Cosmos
+
+A granular looping effect with a retro-futurist look. It grabs short pieces of what you play and loops,
+rearranges, pitch-shifts and echoes them, then runs them through a resonant filter and a reverb. The workflow
+takes cues from granular multi-effect pedals; the DSP, names and art are original. Cosmos is the series' one
+plugin without an animal.
+
+- **11 effects in four families, 4 variations each** (44 host programs, `Mosaic A` ... `Warp D`).
+  MICRO LOOP: MOSAIC stacks loops at different speeds, SEQUENCE steps through pitched slices, GLIDE slides loops
+  in pitch. GRANULES: HAZE is a dense grain cloud, TUNNEL a drone of long grains, STRUM plays grains as a chord
+  on every attack. GLITCH: BLOCKS reorders the beat, INTERRUPT breaks stutters and tape stops into the signal,
+  ARP plays slices as an arpeggio. MULTIDELAY: PATTERN is a rhythmic multi-tap echo, WARP pitch-shifts or
+  reverses each repeat.
+- **ACTIVITY** sets how busy the effect is (layers, density, speed or taps, shown under the knob); **SHAPE**
+  the grain envelope (square, swell, triangle, decay); **TIME** the clock against the tempo (1/4 to 8 steps
+  per beat, host-locked while the transport plays; SYNC off or no host tempo uses TAP / its own tempo).
+- **REPEATS** feeds the effect back into itself, **FILTER** / RESONANCE is a resonant lowpass, **SPACE** /
+  REVERB TIME an 8-line FDN reverb, MOD FREQ / MOD DEPTH a pitch wobble of up to a semitone.
+- **HOLD** freezes what the effect listens to; grains and echo patterns keep playing the held moment.
+- **Looper**: up to 60 s, REC / PLAY / DUB, STOP, CLEAR, REVERSE; PRE-FX plays the loop through the effect,
+  off records the output. The loop audio is not saved with the set.
+- **Display**: the last four seconds of what the effect hears, every grain placed by when it reads and its pitch,
+  echo taps, tempo, beat and output meter.
+- No latency. Under 1% of one core per instance at 48 kHz (Apple Silicon, measured in the tests).
+
+<p align="center">
+  <img src="docs/images/cosmos-ui.png" alt="Cosmos by Animal Audio" width="760">
+</p>
+
+> Screenshot from `AA_SCREENSHOT_DIR=docs/images ./build/plugins/cosmos/CosmosTests "cosmos: editor renders headlessly"`.
+
 ## Build
 
 Requirements: CMake 3.22+, a C++17 compiler, and Ninja (optional, recommended). JUCE and Catch2 are
@@ -217,7 +249,7 @@ Upload paths and Supabase steps: [docs/RELEASE.md](docs/RELEASE.md) and **animal
 CMakeLists.txt          top level: fetches JUCE/Catch2, adds shared/ and every plugins/*
 cmake/                  FetchDependencies.cmake, AnimalAudioPlugin.cmake (aa_add_plugin)
 shared/dsp/             animalaudio::dsp  header-only C++17 DSP (smoothing, tempo sync, curves, gain engine, pitch
-                        tracking, sinc resampling, oversampling, tube drive) + tests
+                        tracking, sinc resampling, oversampling, tube drive, filter, reverb) + tests
 shared/core/            animalaudio::core curve state, shaper processor base class (params, state, transport)
 shared/ui/              animalaudio::ui   Theme (palette + animal motif), the shaper editor and its widgets
 shared/testing/         animalaudio::testing  standard test suites every shaper plugin runs

@@ -14,6 +14,7 @@ Stack: **JUCE 8 + CMake (C++17)**, Catch2 for tests. VST3 only (Standalone optio
 | Duck (volume ducking / shaper) | `plugins/duck` | `Duck` (`Duck_VST3`), tests: `DuckTests` | `Duck` |
 | Turtle Time (half-time / time warp) | `plugins/turtletime` | `TurtleTime` (`TurtleTime_VST3`), tests: `TurtleTimeTests` | `Turt` |
 | Parrot (pitch / formant voice bender) | `plugins/parrot` | `Parrot` (`Parrot_VST3`), tests: `ParrotTests` | `Parr` |
+| Cosmos (granular looper / multi-effect) | `plugins/cosmos` | `Cosmos` (`Cosmos_VST3`), tests: `CosmosTests` | `Cosm` |
 
 New plugins: use the **`/vst <name or idea>`** skill (see [Creating a plugin with `/vst`](#creating-a-plugin-with-vst)).
 
@@ -39,7 +40,7 @@ cmake/                FetchDependencies.cmake (JUCE/Catch2 pins), AnimalAudioPlu
                       NEEDS_MIDI_INPUT TRUE for effects that take MIDI notes, like Parrot)
 shared/dsp/           animalaudio::dsp  INTERFACE, pure C++17, NO JUCE. Tests in shared/dsp/tests
   Smoothing.h         OnePoleSmoother (parameter/gain declick)
-  TempoSync.h         Division (1/8..1/1), beatsPerCycle, PhaseTracker (host-locked or free-run phase)
+  TempoSync.h         Division (1/8..1/1), beatsPerCycle, PhaseTracker (host-locked or free-run phase), bpmOr
   ShapeCurve.h        node/bend curve (message thread) + CurveTable (baked LUT for the audio thread)
   CurvePreset.h       CurvePreset / CurvePresetList;  StandardPresets.h: the 16 stock shapes (plugin supplies names)
   CurveGainShaper.h   curve -> gain engine (declick, mix, scope feed);  CycleScope.h: audio->UI scope bins
@@ -48,6 +49,9 @@ shared/dsp/           animalaudio::dsp  INTERFACE, pure C++17, NO JUCE. Tests in
   Oversampler.h       Oversampler4x (polyphase Kaiser FIR, integer latency of 32 base samples)
   TubeDrive.h         two 12AX7 stages (Koren triode, Cohen & Helie constants, grid current, cathode bias shift),
                       4x oversampled, level-matched, exactly clean at drive 0; heat meter for the UI
+  Interpolation.h     catmullRom (4-point cubic for fractional buffer reads)
+  Svf.h               trapezoidal state-variable filter (low/band/high), safe under fast modulation
+  FdnReverb.h         stereo 8-line FDN reverb (allpass diffusion, Hadamard, damping, modulated lines), RT60 decay
 shared/core/          animalaudio::core INTERFACE (sources compile into each plugin): JUCE but no GUI
   CurveState          curve stored in the APVTS ValueTree + lock-free-ish publish to the audio thread
   CurveShaperProcessor  base AudioProcessor: standard params (division, mix, fallbackBpm), state save/restore,
@@ -78,6 +82,14 @@ plugins/parrot/       pitch / formant voice bender (own processor and editor):
   Source/ui/          ParrotTheme (kThemeHue 355), ParrotMotif (macaw head, feather knob pointer, drifting feathers),
                       ParrotWidgets (ParrotKnob)
   tests/              ParrotTests.cpp
+plugins/cosmos/       granular looper (own processor and editor; the series' one non-animal plugin):
+  Source/             CosmosProcessor (params, 44 host programs, looper commands), CosmosEditor
+  Source/dsp/         CosmosModes (11 effects, families, TIME), CosmosEngine (history, grains, clock, taps, hold,
+                      filter, reverb, mix), PhraseLooper
+  Source/ui/          CosmosTheme (kThemeHue 186, sunset ramp, family colours), CosmosMotif (ringed planet, machined
+                      cap, starfield + synthwave grid, sunset lettering), CosmosWidgets (CosmosKnob, ModeButton,
+                      HoldButton)
+  tests/              CosmosTests.cpp
 templates/plugin/     starter copied by scripts/new_plugin.py (placeholders __NAME__, __NAME_LOWER__, __HUE__, ...)
 .cursor/skills/       the /setup, /vst and /release skills (canonical);  .claude/skills/ holds copies made by scripts/sync_skills.sh
 scripts/              new_plugin.py, install_plugins.py (+ tests/), verify_plugin.sh, plan_release.py / tag_release.py (semver from conventional commits), release_plugin.sh (any slug; release_win_plugin.ps1 kept, unused in beta), build_mac_pkg.sh, installers/ (mac + win templates), validate/upload release helpers, format.sh, sync_skills.sh, check_repo.sh (docs/RELEASE.md)
@@ -314,10 +326,52 @@ Parrot moves a voice's pitch and formants independently (SHIFT / SNAP / ROBOT) a
 - Limits: the tube model is physically based, not a copy of any commercial saturator. PSOLA is monophonic: chords
   or doubled voices will warble.
 
+## Cosmos specifics
+
+Cosmos is a granular looper / multi-effect: 11 effects in four families with 4 variations each, HOLD, a phrase
+looper, resonant lowpass and reverb. The workflow takes cues from granular multi-effect pedals; the DSP, effect
+names and art are original. It has no animal by request (theme name COSMOS, a ringed-planet `Motif`); it still
+carries the Animal Audio `BrandBadge`, its own palette and a Motif.
+
+- Signal path (`Source/dsp/CosmosEngine.h`), per sample: input (+ phrase loop when PRE-FX) is written into a
+  stereo history (power of two, >= 16 s; frozen while HOLD) together with the REPEATS feedback (DC-blocked,
+  soft-clipped). Up to 48 grains read the history (shared `catmullRom`) with an envelope from SHAPE
+  (`shapeEnvelope`: square, swell, triangle, decay), a "smooth" window (sums to 1 at 50% overlap, WARP) or a
+  2 ms gate (stutters). PATTERN reads up to 4 taps instead. Wet -> EFFECT VOL -> `dsp::Svf` lowpass (resonance
+  trims the passband by 1/sqrt(Q)) -> `dsp::FdnReverb` (SPACE) -> a soft ceiling at +6 dB -> equal-power MIX
+  (sqrt). POST-FX looper records and adds after the mix. `prepare` allocates; `process` does not.
+- Grains and taps read relative to `anchor`, the history "now". While HOLD is on, the history stops recording
+  and `anchor` loops over the last max(2 steps, 0.25 s) (<= 8 s), so rhythmic modes keep their pattern; taps
+  duck for ~8 ms around each loop wrap and around HOLD switching (the switch waits for the duck).
+  `spawn()` shifts every grain so its whole read (with glide and modulation margin) stays inside written,
+  not-yet-overwritten history.
+- Clock: steps per beat = TIME (1/4, 1/2, 1X, 2X, 4X, 8X). SYNC on and the host reporting a tempo: host BPM, and
+  the step position locks to `ppq * TIME` while the transport plays; otherwise it free-runs at the `tempo`
+  parameter (TAP sets it and turns SYNC off). Rhythmic modes act on each step (`onTick`); HAZE, TUNNEL and WARP
+  spawn continuously. STRUM also fires on input onsets (fast/slow envelope ratio, >= 150 ms apart).
+- Randomness is a seeded xorshift consumed in sample order, and filter coefficients refresh on a global
+  16-sample grid, so renders are block-size independent (tested at 1, 37, 256, 1024).
+- Parameters (APVTS, version 1): `mode` (11), `variation` (A-D), `activity`, `shape`, `modFreq` (0.05-12 Hz),
+  `filter` (60 Hz-20 kHz), `resonance`, `mix` (default 50%), `effectVolume` (-24..+12 dB), `time` (default 1X),
+  `sync` (default on), `tempo` (40-240), `repeats`, `modDepth`, `space`, `reverbTime` (0.4-20 s), `loopLevel`,
+  `hold`, `loopReverse`, `loopPreFx` (default on). Host programs = mode x variation (`Mosaic A` .. `Warp D`).
+- Looper (`PhraseLooper`, 60 s, capped at 2^23 samples): REC -> PLAY -> DUB -> PLAY on one button, STOP, CLEAR,
+  REVERSE (flips direction in place, no jump). Commands go UI -> processor through an atomic and are applied at
+  the next block. Seam fades 4 ms; start/stop/clear fade 6 ms. Loop audio is not part of the saved state.
+- UI (`CosmosEditor`, 980x660): header (planet, sunset-striped COSMOS, tagline, brand badge, racing stripes);
+  EFFECT panel (family boxes with LED mode buttons, VARIATION pills); CRT display (family, effect, variation,
+  tempo/source/TIME, beat dots, grain field of the last 4 s with the history overview, grains, taps, HOLD chip,
+  blurb, output meter; scanlines over the synthwave ambient); LOOPER panel (progress ring, LEVEL, transport,
+  REVERSE, PRE-FX); knob strip ACTIVITY, SHAPE/MOD FREQ, FILTER/RESONANCE, MIX/EFFECT VOL, TIME/SYNC/TAP,
+  REPEATS/MOD DEPTH, SPACE/REVERB TIME, HOLD. Knob colours walk the sunset ramp; ACTIVITY takes the family colour.
+- Palette: deep-space navy, cream text, phosphor-cyan accent (`kThemeHue` 186); sunset ramp gold -> orange ->
+  pink -> violet -> cyan for knobs, logo and family colours. VST3 bundle: `Cosmos.vst3`.
+
 ## Branding
 
 - Company: **Animal Audio** (wordmark "ANIMAL AUDIO" with a paw glyph, `animalaudio::ui::BrandBadge`;
-  it must appear on every plugin UI). Plugin names are single animal words in caps in the UI ("DUCK").
+  it must appear on every plugin UI). Plugin names are single animal words in caps in the UI ("DUCK"); Cosmos is
+  the one deliberate exception (no animal, still its own palette, Motif and the brand badge).
 - Tone: playful but clean. Warm, saturated accents on a dark, low-contrast base; rounded shapes; one
   motif per plugin drawn with `juce::Path` (no bitmap assets, no external fonts).
 - Every plugin has its own palette and its own animal (see "Theme" above); Duck's: yellow `#FFCB1F`, bill orange `#FF8A1F`/`#FF7A1A`, charcoal `#1A1610`/`#241F15`, water blue
