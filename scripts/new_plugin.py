@@ -13,6 +13,8 @@ workflow dropdown. Re-run cmake to build.
 from __future__ import annotations
 
 import argparse
+import colorsys
+import json
 import re
 import shutil
 import sys
@@ -71,6 +73,40 @@ def pick_hue(taken: list[float]) -> float:
     if not taken:
         return 210.0
     return max((float(h) for h in range(0, 360, 5)), key=lambda h: (min(hue_distance(h, t) for t in taken), -h))
+
+
+def next_catalog_code(plugins_dir: Path) -> str:
+    """The next AA-NNN store code after every plugin's catalog.json."""
+    numbers = [0]
+    for path in plugins_dir.glob("*/catalog.json"):
+        try:
+            match = re.fullmatch(r"AA-([0-9]{3})", json.loads(path.read_text(encoding="utf-8")).get("code", ""))
+        except (json.JSONDecodeError, AttributeError):
+            match = None
+        if match:
+            numbers.append(int(match.group(1)))
+    return f"AA-{max(numbers) + 1:03d}"
+
+
+def hsv_hex(hue: float, saturation: float, value: float) -> str:
+    r, g, b = colorsys.hsv_to_rgb((hue % 360.0) / 360.0, saturation, value)
+    return "#" + "".join(f"{round(c * 255):02x}" for c in (r, g, b))
+
+
+def starter_catalog(name: str, description: str, hue: float, plugins_dir: Path) -> dict:
+    """A valid store listing to start from (accent and panel match makePaletteFromHue). /vst rewrites the copy."""
+    words = " ".join(re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z0-9]+", name)) or name
+    return {
+        "code": next_catalog_code(plugins_dir),
+        "name": words.upper(),
+        "category": "Effect",
+        "blurb": description,
+        "longDescription": description,
+        "highlights": [description[:60]],
+        "accent": hsv_hex(hue, 0.88, 1.0),
+        "surface": hsv_hex(hue, 0.30, 0.15),
+        "initialAccess": ["admin"],
+    }
 
 
 def render(text: str, values: dict[str, str]) -> str:
@@ -180,10 +216,14 @@ def main() -> None:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(render(source.read_text(encoding="utf-8"), values), encoding="utf-8")
 
+    catalog = starter_catalog(name, description, hue, plugins_dir)
+    (destination / "catalog.json").write_text(json.dumps(catalog, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
     readme_updated = False if args.no_readme else add_readme_row(root / "README.md", name, folder, description)
     workflow_updated = add_release_workflow_plugin(root / ".github" / "workflows" / "release.yml", folder)
 
-    print(f"Created {destination.relative_to(root)} (target {name}, plugin code {code}, theme hue {hue:g})")
+    print(f"Created {destination.relative_to(root)} (target {name}, plugin code {code}, theme hue {hue:g}, "
+          f"store code {catalog['code']})")
     if readme_updated:
         print("Added a row to the README plugin table")
     if workflow_updated:
@@ -194,7 +234,9 @@ def main() -> None:
     print(f"  ctest --test-dir build -R '^{folder}\\.'")
     print(f"  scripts/verify_plugin.sh {name}      # build + ctest + pluginval + screenshot")
     print("  then: see .cursor/skills/vst/SKILL.md (DSP, animal motif, palette tuning, presets, docs, release readiness)")
-    print(f"  after the PR is merged, a maintainer ships it with /release {folder} (no release-script changes needed)")
+    print(f"  write the store listing in plugins/{folder}/catalog.json (Software Center name, copy, colours)")
+    print(f"  after the PR is merged, the Release workflow ships it and lists it in the Software Center (admins only")
+    print(f"  until opened under Plugin availability, or set initialAccess)")
 
 
 if __name__ == "__main__":

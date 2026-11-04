@@ -3,7 +3,7 @@
 # Requires: AA_SUPABASE_ACCESS_TOKEN (or SUPABASE_ACCESS_TOKEN)
 # Optional: AA_SUPABASE_PROJECT_REF (default huivhdradgroykfvtclx), AA_SUPABASE_DB_PASSWORD
 set -euo pipefail
-web_repo="${1:?animal-audio-web path}"
+web_repo="${1:?earth-audio path}"
 token="${AA_SUPABASE_ACCESS_TOKEN:-${SUPABASE_ACCESS_TOKEN:-}}"
 ref="${AA_SUPABASE_PROJECT_REF:-huivhdradgroykfvtclx}"
 if [ -z "$token" ]; then

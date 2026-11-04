@@ -209,7 +209,7 @@ works for every plugin: pass its slug (the folder name under `plugins/`, e.g. `d
 3. Validate an existing artifact: `python3 scripts/validate_plugin_release.py --plugin <slug> --platform mac --artifact … --require-notarized`.
 4. Windows releases are paused during the beta (scripts kept: `scripts/release_win_plugin.ps1`).
 
-Upload paths and Supabase steps: [docs/RELEASE.md](docs/RELEASE.md) and **animal-audio-web** `docs/DOWNLOADS_LAUNCH.md`.
+Upload paths and Supabase steps: [docs/RELEASE.md](docs/RELEASE.md) and **earth-audio** `docs/DOWNLOADS_LAUNCH.md`.
 
 ## Repository layout
 

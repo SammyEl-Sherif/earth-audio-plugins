@@ -77,7 +77,7 @@ Invoke-Step "validate" {
 
 if ($Upload) {
     Invoke-Step "upload to Supabase" {
-        $env:AA_WEB_REPO = if ($env:AA_WEB_REPO) { $env:AA_WEB_REPO } else { Join-Path (Split-Path $RepoRoot -Parent) "animal-audio-web" }
+        $env:AA_WEB_REPO = if ($env:AA_WEB_REPO) { $env:AA_WEB_REPO } else { Join-Path (Split-Path $RepoRoot -Parent) "earth-audio" }
         python scripts/upload_plugin_release.py --manifest $manifest --zip $artifact
     }
 }

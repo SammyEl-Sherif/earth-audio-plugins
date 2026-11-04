@@ -1,0 +1,18 @@
+{
+  "code": "AA-002",
+  "name": "TURTLE TIME",
+  "category": "Time warp",
+  "blurb": "Half-time, reverse, and slice repeat, locked to your host's playhead.",
+  "longDescription": "TURTLE TIME records your audio and plays it back at half or quarter speed, backwards, or as a looping slice, snapping back to the grid so the pitch drop stays in time. 32 patterns, a mix knob, and a live display of how far the turtle lags behind the beat.",
+  "highlights": [
+    "Octave-down half-time",
+    "Reverse and slice repeat",
+    "Locked to the host playhead"
+  ],
+  "accent": "#45e09a",
+  "surface": "#151a19",
+  "initialAccess": [
+    "admin",
+    "vip"
+  ]
+}

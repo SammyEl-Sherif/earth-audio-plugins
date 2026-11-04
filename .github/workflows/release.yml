@@ -134,16 +134,17 @@ jobs:
           name: release-${{ matrix.slug }}
           path: ${{ env.DIST }}
 
-      - name: Checkout animal-audio-web
+      # Only for `supabase link` (its supabase/ config). The listing itself comes from plugins/<slug>/catalog.json.
+      - name: Checkout earth-audio
         uses: actions/checkout@v4
         with:
-          repository: SammyEl-Sherif/animal-audio-web
-          path: animal-audio-web
+          repository: SammyEl-Sherif/earth-audio
+          path: earth-audio
           token: ${{ secrets.AA_WEB_REPO_GITHUB_TOKEN || github.token }}
 
-      - name: Upload to Supabase and publish plugin_releases
+      - name: Upload to Supabase, list in plugin_catalog and publish plugin_releases
         env:
-          AA_WEB_REPO: ${{ github.workspace }}/animal-audio-web
+          AA_WEB_REPO: ${{ github.workspace }}/earth-audio
           AA_SUPABASE_ACCESS_TOKEN: ${{ secrets.AA_SUPABASE_ACCESS_TOKEN }}
           AA_SUPABASE_DB_PASSWORD: ${{ secrets.AA_SUPABASE_DB_PASSWORD }}
         run: python3 scripts/upload_plugin_release.py --manifest "$DIST/manifest-mac.json" --zip "$DIST/$PKG"

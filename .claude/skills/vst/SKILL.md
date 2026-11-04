@@ -241,8 +241,8 @@ same words from `PRODUCT_NAME` by splitting the PascalCase.
 
 ### Release readiness (the plugin must be shippable as merged)
 
-Merging releases it automatically (first release = its VERSION; `release.yml`, macOS); the maintainer then lists it
-on the site with `/release <name_lower>`, with no further code changes. Check:
+Merging releases it automatically (first release = its VERSION; `release.yml`, macOS) and lists it in the Animal
+Software Center from `catalog.json`, with no further code changes anywhere. Check:
 
 - `plugins/<name_lower>/VERSION` exists and is semver (`0.1.0` from the scaffold). It ships as is on merge, so set the
   public version the maintainer wants in this PR.
@@ -251,7 +251,13 @@ on the site with `/release <name_lower>`, with no further code changes. Check:
   names are derived from it automatically.
 - Plugin code and every parameter ID / ValueTree identifier are final: they are the saved-state contract once released.
 - `pluginval` passes at strictness 10 locally and CI (`ci-ok`, macOS) is green.
-- `docs/images/<name_lower>-ui.png` is committed (README and the website product page use it).
+- `docs/images/<name_lower>-ui.png` is committed (README, the Software Center listing and the website use it).
+- `plugins/<name_lower>/catalog.json` is the real store listing (the scaffold writes a placeholder): `code` (keep the
+  scaffold's `AA-NNN`), `name` (display name in caps), `category`, `blurb` (one sentence, playful but clean),
+  `longDescription` (two sentences), `highlights` (three short phrases), `accent` / `surface` (lowercase hex of
+  `palette.accent` / `palette.panel` from `Source/ui/<Name>Theme.cpp`), `initialAccess` (who can use the first
+  release: `["admin"]` by default, `["admin", "vip"]` for a private beta, `["member"]` for everyone). The scripts tests
+  (`scripts/check_repo.sh`) validate it.
 - No changes under `scripts/release*`, `scripts/build_mac_pkg.sh`, `scripts/installers/` or
   `.github/workflows/release.yml` for this plugin (the scaffold adds its slug to the dropdown). If the generic pipeline really cannot ship it, fix the
   generic code with tests in a separate PR; never add `if slug == ...` or a `release_<name>.sh` wrapper.
@@ -271,19 +277,10 @@ on the site with `/release <name_lower>`, with no further code changes. Check:
   `gh repo fork --remote --remote-name fork && git push -u fork HEAD && gh pr create --repo <upstream owner>/<repo> --base main`.
 - PR description: what the plugin does, animal + palette hue, what was extracted to shared/ (and which plugins it
   touched), exactly what was verified (ctest count, pluginval level, screenshot) and what was not (macOS/Windows,
-  real DAW), assumptions you made. End it with a **Site listing** block the maintainer copies into the
-  animal-audio-web catalog at release time:
-
-  ```text
-  slug: <name_lower>            bundle: <Name>.vst3           display name: <WORDS IN CAPS>
-  category: <e.g. Stereo wobbler>
-  blurb: <one sentence, playful but clean>
-  long description: <two sentences>
-  highlights: <three short phrases>
-  accent: <hex of palette.accent> on <hex of palette.panel>   (from Source/ui/<Name>Theme.cpp)
-  ```
-- Releasing is not part of this skill: after merge a maintainer runs `/release <name_lower>` (signs + notarizes on
-  Mac with repo secrets, uploads, publishes the GitHub Release, lists it on animal.audio). See docs/RELEASE.md.
+  real DAW), assumptions you made, and who `initialAccess` opens the first release to.
+- Releasing is automatic on merge: the Release workflow signs + notarizes, uploads, lists the plugin in the Software
+  Center from `catalog.json` and publishes the GitHub Release. `/release <name_lower>` checks it and handles the
+  rest (availability, an optional website page). See docs/RELEASE.md.
 - Final report to the user, briefly: PR link (if any), what was built, what was shared/extracted, verification,
   **installed VST3 path(s) and build stamp** (if you ran install), Ableton rescan reminder, caveats (DAW not
-  tried unless they confirmed load), and the next step: "once merged, a maintainer runs `/release <name_lower>`".
+  tried unless they confirmed load), and the next step: "once merged it releases and appears in the Software Center for `initialAccess`; `/release <name_lower>` verifies it".

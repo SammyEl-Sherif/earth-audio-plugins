@@ -17,16 +17,16 @@ Stack: **JUCE 8 + CMake (C++17)**, Catch2 for tests. VST3 only (Standalone optio
 
 New plugins: use the **`/vst <name or idea>`** skill (see [Creating a plugin with `/vst`](#creating-a-plugin-with-vst)).
 
-### Plugin lifecycle (clone to live on animal.audio)
+### Plugin lifecycle (clone to live in the Software Center)
 
 | Step | Who | How |
 | --- | --- | --- |
 | 1. Clone, build, install everything | any dev | **`/setup`** (`scripts/install_plugins.py --build --clean`) |
 | 2. Make the plugin | contributor | **`/vst <name or idea>`**: scaffold, DSP, Theme + Motif, tests, pluginval, local install, docs, release-readiness check |
-| 3. PR to `main` | contributor | branch `feat/<slug>-plugin` (fork if no write access); CI (`ci-ok`) green; conventional commit titles (`feat:` / `fix:` drive the version); PR ends with a "Site listing" block |
+| 3. PR to `main` | contributor | branch `feat/<slug>-plugin` (fork if no write access); CI (`ci-ok`) green; conventional commit titles (`feat:` / `fix:` drive the version); `plugins/<slug>/catalog.json` holds the store listing |
 | 4. Review + merge | maintainer | DRY/branding/realtime review against this file |
-| 5. Release | CI / maintainer | Automatic on merge (`release.yml`): every plugin with `feat`/`fix`/breaking commits since its last tag (or no tag yet) gets the next semver, is built, tested, notarized (Mac `.pkg`, macOS only in beta), VERSION-bumped + tagged `<slug>-vX.Y.Z`, uploaded to Supabase (`plugin_releases`) and published as a GitHub Release. Manual: **Release** workflow (plugin + bump) or **`/release <slug>`** |
-| 6. List on the site | maintainer | `/release` step 3: catalog PR in **animal-audio-web** (`packages/catalog`, landing data, accent) |
+| 5. Release | CI / maintainer | Automatic on merge (`release.yml`): every plugin with `feat`/`fix`/breaking commits since its last tag (or no tag yet) gets the next semver, is built, tested, notarized (Mac `.pkg`, macOS only in beta), VERSION-bumped + tagged `<slug>-vX.Y.Z`, uploaded to Supabase (installer + screenshot), listed in the Software Center (`plugin_catalog` from `catalog.json`, first `plugin_access` row from `initialAccess`), published (`plugin_releases`) and as a GitHub Release. Manual: **Release** workflow (plugin + bump) or **`/release <slug>`** |
+| 6. Open it up | admin | Software Center **Settings → Plugin availability** (or `/admin`): VIP / everyone. Optional website product page: `/release` step 3b, PR in **earth-audio** |
 
 Contributors never need Apple or Supabase credentials and never edit release scripts for their plugin. Skills:
 `.cursor/skills/{setup,vst,release}/SKILL.md` (canonical; `.claude/skills/` mirrors via `scripts/sync_skills.sh`).

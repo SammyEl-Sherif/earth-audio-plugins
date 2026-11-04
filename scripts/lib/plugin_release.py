@@ -1,10 +1,12 @@
-"""Per-plugin release metadata (semver, paths, Supabase slug).
+"""Per-plugin release metadata (semver, paths, Supabase slug, store listing).
 
 Source of truth for product version: plugins/<slug>/VERSION (semver x.y.z).
 CMake target and VST3 bundle name come from plugins/<slug>/CMakeLists.txt.
+Store listing (Software Center name, copy, colours, first-release access): plugins/<slug>/catalog.json.
 """
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -107,3 +109,109 @@ def get_plugin(slug: str, *, repo_root: Path | None = None) -> PluginReleaseInfo
 
 def read_plugin_version(slug: str, *, repo_root: Path | None = None) -> str:
     return get_plugin(slug, repo_root=repo_root).version
+
+
+# ---------------------------------------------------------------- store listing (catalog.json)
+
+ACCESS_ROLES = ("member", "vip", "super-vip", "admin")
+_HEX = re.compile(r"^#[0-9a-f]{6}$")
+_CODE = re.compile(r"^AA-[0-9]{3}$")
+
+
+@dataclass(frozen=True)
+class PluginCatalog:
+    """What the Software Center shows for a plugin (`public.plugin_catalog`), from plugins/<slug>/catalog.json."""
+
+    code: str
+    name: str
+    category: str
+    blurb: str
+    long_description: str
+    highlights: tuple[str, ...]
+    accent: str
+    surface: str
+    initial_access: tuple[str, ...]
+
+
+def catalog_path(slug: str, *, repo_root: Path | None = None) -> Path:
+    return (repo_root or ROOT) / "plugins" / slug / "catalog.json"
+
+
+def screenshot_path(slug: str, *, repo_root: Path | None = None) -> Path:
+    """The headless UI render the plugin's tests write (README image); uploaded next to each release."""
+    return (repo_root or ROOT) / "docs" / "images" / f"{slug}-ui.png"
+
+
+def parse_catalog(data: object, source: str = "catalog.json") -> PluginCatalog:
+    """Validates a catalog.json document. Raises ValueError listing every problem."""
+    problems: list[str] = []
+    if not isinstance(data, dict):
+        raise ValueError(f"{source}: expected a JSON object")
+
+    def text(key: str, limit: int) -> str:
+        value = data.get(key)
+        if not isinstance(value, str) or not value.strip():
+            problems.append(f"{key} must be a non-empty string")
+            return ""
+        if len(value) > limit:
+            problems.append(f"{key} is longer than {limit} characters")
+        if "\x00" in value:
+            problems.append(f"{key} contains a NUL character")
+        return value.strip()
+
+    code = text("code", 16)
+    if code and not _CODE.match(code):
+        problems.append(f"code {code!r} must look like AA-004")
+    name = text("name", 40)
+    category = text("category", 40)
+    blurb = text("blurb", 200)
+    long_description = text("longDescription", 600)
+
+    highlights = data.get("highlights")
+    if not isinstance(highlights, list) or not 1 <= len(highlights) <= 6 or not all(
+        isinstance(item, str) and item.strip() and len(item) <= 60 for item in highlights
+    ):
+        problems.append("highlights must be 1-6 non-empty strings of up to 60 characters")
+        highlights = []
+
+    colours = {}
+    for key in ("accent", "surface"):
+        value = data.get(key)
+        if not isinstance(value, str) or not _HEX.match(value):
+            problems.append(f"{key} must be a lowercase hex colour like #52e5f2")
+        colours[key] = value if isinstance(value, str) else ""
+
+    access = data.get("initialAccess", ["admin"])
+    if not isinstance(access, list) or not access or not all(role in ACCESS_ROLES for role in access):
+        problems.append(f"initialAccess must be a non-empty list of {', '.join(ACCESS_ROLES)}")
+        access = ["admin"]
+
+    unknown = set(data) - {
+        "code", "name", "category", "blurb", "longDescription", "highlights", "accent", "surface", "initialAccess",
+    }
+    if unknown:
+        problems.append(f"unknown keys: {', '.join(sorted(unknown))}")
+    if problems:
+        raise ValueError(f"{source}: " + "; ".join(problems))
+    return PluginCatalog(
+        code=code,
+        name=name,
+        category=category,
+        blurb=blurb,
+        long_description=long_description,
+        highlights=tuple(item.strip() for item in highlights),
+        accent=colours["accent"],
+        surface=colours["surface"],
+        initial_access=tuple(dict.fromkeys(access)),
+    )
+
+
+def load_catalog(slug: str, *, repo_root: Path | None = None) -> PluginCatalog:
+    path = catalog_path(slug, repo_root=repo_root)
+    if not path.is_file():
+        raise ValueError(f"missing {path.relative_to(repo_root or ROOT)}: every plugin needs a store listing")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise ValueError(f"{path}: invalid JSON ({error})") from error
+    return parse_catalog(data, str(path.relative_to(repo_root or ROOT)))

@@ -76,13 +76,42 @@ resources without signing: `scripts/build_mac_pkg.sh <slug> <path/to/Product.vst
 
 Agents: the **`/release <slug>`** skill (`.cursor/skills/release/SKILL.md`) runs these steps and checks each result.
 
-1. Merge the plugin to `main` with `plugins/<slug>/VERSION` (set the public version in the PR) and green CI.
-2. Automatic: the **Release** run for that merge ships it (no tag yet → first release). Check it with
-   `gh run list --workflow release.yml --limit 3`.
-3. List it on the site: PR in **animal-audio-web** adding the plugin to `packages/catalog/src/plugins.ts`
-   (`slug` = `<slug>`, `bundleName` = `<PRODUCT_NAME>.vst3`) and `src/modules/LandingPage/data/plugins.ts`, plus an
-   accent theme if it needs a new colour. The new plugin PR's "Site listing" block has the copy. Merging deploys the site.
-4. Smoke test: `/plugins/<slug>` shows the Mac download at the new version; the Animal Software Center offers Install.
+1. Merge the plugin to `main` with `plugins/<slug>/VERSION` (set the public version in the PR), its store listing
+   `plugins/<slug>/catalog.json`, `docs/images/<slug>-ui.png`, and green CI.
+2. Automatic: the **Release** run for that merge ships it (no tag yet → first release) and lists it in the Animal
+   Software Center. Check it with `gh run list --workflow release.yml --limit 3`.
+3. Install it from the Software Center. The first release is open to `initialAccess` (admins by default); open it to
+   VIP or everyone under **Settings → Plugin availability**.
+4. Optional: a website product page is still a hand-made PR in **earth-audio** (`/release` step 3b).
+
+### The store listing (`plugins/<slug>/catalog.json`)
+
+```json
+{
+  "code": "AA-004",
+  "name": "COSMOS",
+  "category": "Granular looper",
+  "blurb": "One sentence.",
+  "longDescription": "Two sentences.",
+  "highlights": ["Three", "short", "phrases"],
+  "accent": "#52e5f2",
+  "surface": "#0e1120",
+  "initialAccess": ["admin"]
+}
+```
+
+`accent` / `surface` are the plugin's `palette.accent` / `palette.panel` (lowercase hex). `initialAccess` (`member`,
+`vip`, `super-vip`, `admin`; default `["admin"]`) is written only when the plugin has no `plugin_access` row yet, so
+availability an admin set is never changed by a later release. `scripts/new_plugin.py` writes a valid starter;
+`scripts/tests` validate every plugin's file (CI). On every release the publish step:
+
+1. uploads the installer and `docs/images/<slug>-ui.png` to `plugin-releases/<slug>/<version>/`,
+2. upserts `public.plugin_catalog` (listing + bundle name + screenshot path),
+3. inserts the first `public.plugin_access` row if missing,
+4. publishes the `public.plugin_releases` row last, so the app never sees a release without its listing.
+
+The Software Center reads `plugin_catalog` (earth-audio `apps/software-center/src/library/pluginCatalog.ts`); an entry
+compiled into earth-audio's `packages/catalog` still takes precedence (hand-made art).
 
 Updates later: merge `feat:` / `fix:` commits; the merge releases them.
 
@@ -102,7 +131,7 @@ contributors never need Apple credentials.
 | [`scripts/release_mac_plugin.sh`](../scripts/release_mac_plugin.sh) | Build, sign, notarize, staple the bundle |
 | [`scripts/build_mac_pkg.sh`](../scripts/build_mac_pkg.sh) | Signed + notarized `.pkg` from the stapled bundle |
 | [`scripts/validate_plugin_release.py`](../scripts/validate_plugin_release.py) | Validate `.pkg` / `.zip` |
-| [`scripts/upload_plugin_release.py`](../scripts/upload_plugin_release.py) | Supabase Storage upload + publish the active `plugin_releases` row (insert on first release) |
+| [`scripts/upload_plugin_release.py`](../scripts/upload_plugin_release.py) | Supabase Storage upload (installer + screenshot), `plugin_catalog` listing, first `plugin_access` row, then the active `plugin_releases` row (insert on first release) |
 
 Reusable actions: `.github/actions/setup-mac-build` (Ninja, ccache, cached JUCE/Catch2), `apple-signing`
 (keychain + notary settings), `publish-plugin-github-release`.

@@ -1,0 +1,18 @@
+{
+  "code": "AA-003",
+  "name": "PARROT",
+  "category": "Voice bender",
+  "blurb": "Bend your voice anywhere: a new pitch, a new throat, a hot tube on top.",
+  "longDescription": "PARROT moves a voice's pitch and formants independently, snaps it onto semitones or holds it on one robot note you can play from MIDI. A two-stage tube preamp model adds warmth or grit, and a live pitch roll shows exactly what it is doing.",
+  "highlights": [
+    "Pitch and formant, independent",
+    "Snap and MIDI robot modes",
+    "12AX7 tube drive"
+  ],
+  "accent": "#ff4b3e",
+  "surface": "#1a1416",
+  "initialAccess": [
+    "admin",
+    "vip"
+  ]
+}
