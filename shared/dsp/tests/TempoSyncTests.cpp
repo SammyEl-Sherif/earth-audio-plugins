@@ -109,3 +109,14 @@ TEST_CASE("PhaseTracker continues from the host phase when playback stops")
     const auto b = tracker.beginBlock(stopped, Division::Quarter, 120.0, 100);
     REQUIRE(b.startPhase == Approx(0.5));
 }
+
+TEST_CASE("bpmOr prefers a usable host tempo")
+{
+    TransportInfo t;
+    REQUIRE(animalaudio::dsp::bpmOr(t, 97.0) == 97.0);
+    t.hasBpm = true;
+    t.bpm = 0.0;
+    REQUIRE(animalaudio::dsp::bpmOr(t, 97.0) == 97.0);
+    t.bpm = 133.0;
+    REQUIRE(animalaudio::dsp::bpmOr(t, 97.0) == 133.0);
+}
