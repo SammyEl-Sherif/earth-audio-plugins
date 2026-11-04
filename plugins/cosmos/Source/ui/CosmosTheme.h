@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../dsp/CosmosModes.h"
+#include "dsp/CosmosModes.h"
 
 #include <animalaudio/ui/Theme.h>
 
