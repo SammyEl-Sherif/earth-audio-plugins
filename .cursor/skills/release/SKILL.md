@@ -1,6 +1,6 @@
 ---
 name: release
-description: Release one Animal Audio plugin end to end - preflight on main, check or run the Release workflow (Mac notarized .pkg, Supabase upload, GitHub Release; semver from conventional commits), verify, and list it on animal.audio (animal-audio-web catalog PR). Use for /release <slug>, "ship <plugin>", "publish <plugin> to the site", or after a new plugin PR is merged. Maintainers only (needs the repo secrets and animal-audio-web access).
+description: Release one Animal Audio plugin end to end - preflight on main, check or run the Release workflow (Mac notarized .pkg, Supabase upload, Software Center listing, GitHub Release; semver from conventional commits), verify, open it to users, and optionally add a website product page (earth-audio PR). Use for /release <slug>, "ship <plugin>", "publish <plugin> to the site", or after a new plugin PR is merged. Maintainers only (needs the repo secrets).
 argument-hint: '<plugin slug, e.g. "duck"> [bump: auto|patch|minor|major|current]'
 ---
 
@@ -8,12 +8,14 @@ argument-hint: '<plugin slug, e.g. "duck"> [bump: auto|patch|minor|major|current
 
 Request (Claude Code fills this in; in Cursor it is whatever followed `/release`): `$ARGUMENTS`
 
-The pipeline is plugin-agnostic (docs/RELEASE.md). Your job is to run it in order, check each result, and get the
-plugin listed on the site. Never add per-plugin branches or wrapper scripts to make a release work: if a plugin
+The pipeline is plugin-agnostic (docs/RELEASE.md). Your job is to run it in order, check each result, and make sure
+the plugin reaches the people it is for. The release itself lists the plugin in the Animal Software Center (from
+`plugins/<slug>/catalog.json`); nothing in earth-audio has to change for that. Never add per-plugin branches or wrapper scripts to make a release work: if a plugin
 needs something special, fix the generic scripts/templates and their tests in a PR first.
 
 Who can run this: someone with write access to this repo (the workflow uses the Developer ID certificates, notary
-key and Supabase token stored as repo secrets) and to **animal-audio-web**. Contributors never need Apple or
+key and Supabase token stored as repo secrets). A website product page (optional, step 3b) needs **earth-audio**
+access. Contributors never need Apple or
 Supabase credentials; if the user lacks access, stop and say who has to run it.
 
 ## 0. Preflight (all must hold; fix or stop)
@@ -25,7 +27,8 @@ python3 scripts/plan_release.py --plugin <slug>               # what an auto rel
 gh run list --workflow release.yml --branch main --limit 3     # did the merge already release it?
 ```
 
-- The plugin is merged on `main` (`plugins/<slug>/` with `VERSION`, `CMakeLists.txt` `PRODUCT_NAME` PascalCase, no spaces).
+- The plugin is merged on `main` (`plugins/<slug>/` with `VERSION`, `CMakeLists.txt` `PRODUCT_NAME` PascalCase, no spaces,
+  and a valid `catalog.json`: `python3 -c "import sys; sys.path.insert(0,'scripts'); from lib.plugin_release import load_catalog as l; print(l('<slug>'))"`).
 - **Version** (docs/RELEASE.md): semver comes from conventional commits since the last `<slug>-vX.Y.Z` tag
   (`feat` minor, `fix`/`bugfix`/`perf` patch, `!`/`BREAKING CHANGE` major); a plugin with no tag ships its `VERSION`.
   CI commits the bump to `VERSION` and tags it. Never reuse a published version.
@@ -35,7 +38,8 @@ gh run list --workflow release.yml --branch main --limit 3     # did the merge a
 ## 1. Release (usually already done by the merge)
 
 Every push to `main` runs **Release** (`release.yml`): plan → per plugin build, ctest, pluginval, sign, notarize,
-`.pkg` → VERSION bump commit + tag → Supabase upload + `plugin_releases` row + GitHub Release. macOS only during the
+`.pkg` → VERSION bump commit + tag → Supabase upload (installer + `docs/images/<slug>-ui.png`) + `plugin_catalog` listing +
+first-release `plugin_access` row + `plugin_releases` row + GitHub Release. macOS only during the
 beta. If the merge's run succeeded for this version, skip to step 2. Otherwise run it by hand:
 
 ```bash
@@ -65,33 +69,43 @@ gh run download <run-id> -n release-<slug> -D /tmp/<slug>-mac && \
 Optionally install the `.pkg` on a Mac (double-click), rescan in Live, and check the build stamp in the plugin UI
 matches `<version> | <sha>`. Say plainly which of these you did.
 
-## 3. List it on animal.audio (first release only)
+## 3. Who can use it (first release)
 
-Downloads work as soon as the row exists, but the site and the Animal Software Center only show plugins that are in
-the **animal-audio-web** catalog. Open a PR there (read its `AGENTS.md` first; Next.js conventions differ):
+The Software Center lists the plugin as soon as the release finishes: name, copy, colours and screenshot come from
+the `plugin_catalog` row the publish step wrote. Its first `plugin_access` row comes from `initialAccess` in
+`catalog.json` (admin only by default), so admins can install it right away. To open it to VIP or everyone, an admin
+ticks the roles under **Settings → Plugin availability** in the Software Center (or `/admin` on the site). Later
+releases never change availability.
+
+## 3b. Optional: a website product page
+
+The website's catalog is still hand-curated. Only when the plugin should get a product page on the site, open a PR in
+**earth-audio** (read its `AGENTS.md` first; Next.js conventions differ):
 
 1. `packages/catalog/src/plugins.ts`: add an `installablePlugins` entry.
    - `slug`: exactly the plugin folder slug (`plugins/<slug>`), which is also `plugin_releases.plugin_slug`.
    - `bundleName`: exactly `<PRODUCT_NAME>.vst3` from the preflight output (e.g. `HoneyBadger.vst3`, no spaces).
      The Software Center finds installed copies by this name.
    - `code`: next `AA-00N`; `name`: display name in caps (`HONEY BADGER`); `category`, `blurb`, `longDescription`,
-     `highlights`: take them from the plugin PR's "Site listing" block or README section.
+     `highlights`: take them from `plugins/<slug>/catalog.json`.
+     A compiled-in entry overrides the `plugin_catalog` row in the Software Center, so add hand-made art with it.
 2. `src/modules/LandingPage/data/plugins.ts`: add the same slug to `ReleasedPluginSlug` and a `plugins` entry
    (`index` next number, `status: "AVAILABLE NOW"`, `price`). Remove any `catalogPreview` placeholder for it.
 3. Accent: reuse an existing `PluginAccent` only if it matches the plugin's palette. Otherwise add one (both
    `PluginAccent` types, a theme in `src/modules/LandingPage/data/pluginTheme.ts`, and
    `apps/software-center/src/library/PluginPreview.tsx`), using the `accent`/`panel` colours from
-   `plugins/<slug>/Source/ui/<Name>Theme.cpp` so the site matches the plugin.
+   `plugins/<slug>/Source/ui/<Name>Theme.cpp` (the same as `catalog.json` `accent` / `surface`) so the site matches.
 4. Optional: product image from `docs/images/<slug>-ui.png` into `public/landing/`.
 5. `npm test && npm run lint && npm run build`, PR, merge. Merging to `main` deploys the site
    (its `release.yml`); no schema change or migration is needed for a new plugin.
 
 ## 4. Smoke test and report
 
-1. Signed in on `https://animal.audio/plugins/<slug>`: the Mac download shows `<version>`.
-2. Animal Software Center lists the plugin and offers Install (or Update for an older stamp).
-3. Report: version, tag link, workflow run link, artifact sha256 (from the manifest), web PR link, and what was
-   verified by hand versus only by CI.
+1. Signed in as an admin, the Animal Software Center lists the plugin with its own name, copy and screenshot and
+   offers Install (or Update for an older stamp); after installing it shows as up to date.
+2. If you added a product page (3b): `https://www.earthaudio.io/plugins/<slug>` shows the Mac download at `<version>`.
+3. Report: version, tag link, workflow run link, artifact sha256 (from the manifest), who can use it, web PR link if
+   any, and what was verified by hand versus only by CI.
 
 ## Keeping this skill honest
 

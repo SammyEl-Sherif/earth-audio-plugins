@@ -1,0 +1,17 @@
+{
+  "code": "AA-001",
+  "name": "DUCK",
+  "category": "Volume shaper",
+  "blurb": "Shape dynamics with precision. From subtle movement to deep, rhythmic pumping without the routing ritual.",
+  "longDescription": "DUCK turns sidechain and volume motion into a tactile instrument. Draw envelopes, lock to the grid, or free-run for organic pumping that stays musical.",
+  "highlights": [
+    "Draw the curve",
+    "Tempo-synced or free-run",
+    "No sidechain routing"
+  ],
+  "accent": "#ffcb1f",
+  "surface": "#241f15",
+  "initialAccess": [
+    "member"
+  ]
+}

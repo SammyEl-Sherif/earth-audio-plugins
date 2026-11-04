@@ -14,7 +14,7 @@ gh secret set SECRET_NAME -R SammyEl-Sherif/animal-audio-plugins
 | --- | --- |
 | `AA_SUPABASE_ACCESS_TOKEN` | [Supabase account access token](https://supabase.com/dashboard/account/tokens) |
 | `AA_SUPABASE_DB_PASSWORD` | Animal Audio project database password (`huivhdradgroykfvtclx`) |
-| `AA_WEB_REPO_GITHUB_TOKEN` | GitHub PAT with **read** on `SammyEl-Sherif/animal-audio-web` (private repo checkout in CI) |
+| `AA_WEB_REPO_GITHUB_TOKEN` | GitHub PAT with **read** on `SammyEl-Sherif/earth-audio` (formerly `animal-audio-web`; private repo checkout in CI, for `supabase link`) |
 
 ## macOS signing + notarization (**Release** workflow, plugin build jobs)
 
