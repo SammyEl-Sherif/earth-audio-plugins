@@ -52,6 +52,9 @@ public:
             for (auto& d : channel)
                 std::fill(d.buffer.begin(), d.buffer.end(), 0.0f);
         lfoPhase = 0.0;
+        modCounter = 0;
+        for (int i = 0; i < kLines; ++i)
+            lineDelay[i] = lineLength[i];
     }
 
     void setDecaySeconds(float seconds) noexcept
@@ -84,17 +87,22 @@ public:
         const float left = diffuse(0, inL);
         const float right = diffuse(1, inR);
 
-        lfoPhase += kModHz / sampleRate;
-        if (lfoPhase >= 1.0)
-            lfoPhase -= 1.0;
+        // The modulation is slow (well under 1 Hz), so line lengths are refreshed every 16 samples.
+        if ((modCounter++ & 15) == 0)
+        {
+            lfoPhase += 16.0 * kModHz / sampleRate;
+            if (lfoPhase >= 1.0)
+                lfoPhase -= 1.0;
+            for (int i = 0; i < kLines; ++i)
+            {
+                const double lfo = std::sin(6.283185307179586 * (lfoPhase + 0.125 * i));
+                lineDelay[i] = lineLength[i] + modDepth * (1.0 + lfo) * ((i & 1) ? 1.0 : 0.7);
+            }
+        }
 
         std::array<float, kLines> taps{};
         for (int i = 0; i < kLines; ++i)
-        {
-            const double lfo = std::sin(6.283185307179586 * (lfoPhase + 0.125 * i));
-            const double delay = lineLength[i] + modDepth * (1.0 + lfo) * ((i & 1) ? 1.0 : 0.7);
-            taps[static_cast<std::size_t>(i)] = readLine(i, delay);
-        }
+            taps[static_cast<std::size_t>(i)] = readLine(i, lineDelay[i]);
 
         outL = 0.0f;
         outR = 0.0f;
@@ -196,6 +204,8 @@ private:
     Allpass diffusers[2][kDiffusers];
     double modDepth = 0.0;
     double lfoPhase = 0.0;
+    double lineDelay[kLines] = {};
+    unsigned modCounter = 0;
     float decaySeconds = 2.0f;
     float damping = 0.3f;
     float lowCoeff = 0.3f;
