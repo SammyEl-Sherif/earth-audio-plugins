@@ -122,6 +122,9 @@ jobs:
       contents: write
     strategy:
       fail-fast: false
+      # One at a time: every `supabase db query --linked` resets the shared cli_login_postgres temp role's password,
+      # so parallel publishes knock each other's connections out (password authentication failed, run 41901076040).
+      max-parallel: 1
       matrix:
         include: ${{ fromJSON(needs.plan.outputs.releases) }}
     env:

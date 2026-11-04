@@ -20,6 +20,13 @@ class ReleaseWorkflowPluginChoicesTests(unittest.TestCase):
         text = WORKFLOW.read_text(encoding="utf-8")
         self.assertEqual(new_plugin.plugin_slugs_in_release_workflow(text), plugin_release.list_plugin_slugs())
 
+    def test_publish_jobs_run_one_at_a_time(self) -> None:
+        # Parallel `supabase db query --linked` calls reset each other's temp login role password.
+        text = WORKFLOW.read_text(encoding="utf-8")
+        publish = text[text.index("\n  publish:"):]
+        strategy = publish[publish.index("    strategy:"):publish.index("    env:")]
+        self.assertIn("max-parallel: 1", strategy)
+
     def test_add_inserts_a_slug_in_sorted_order(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workflow = Path(tmp) / "release.yml"
