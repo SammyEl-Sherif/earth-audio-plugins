@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../DolphinFlowProcessor.h"
+#include "DolphinFlowProcessor.h" // Source/ is on the include path
 
 #include <animalaudio/ui/PillButton.h>
 #include <animalaudio/ui/Theme.h>
