@@ -49,6 +49,7 @@ and [AGENTS.md](AGENTS.md).
 | **Turtle Time** | Tempo-synced half-time, reverse, and beat repeat | `plugins/turtletime` | Private beta (0.1.0): VST3 builds, plugin tests pass, passes pluginval level 10 on macOS; loaded in Ableton Live on macOS |
 | **Parrot** | Pitch and formant voice bender with snap, robot and tube drive | `plugins/parrot` | Alpha (0.1.0): VST3 builds, plugin tests pass, passes pluginval level 10 on macOS; not yet tried in a DAW |
 | **Cosmos** | Granular looper: micro loops, granules, glitch and multidelay with hold, phrase looper and reverb | `plugins/cosmos` | Alpha (0.1.0): VST3 builds, plugin tests pass, passes pluginval level 10 on macOS; not yet tried in a DAW |
+| **Swan** | Keyboard chord instrument where every note glides into the next chord | `plugins/swan` | Alpha (0.1.0): VST3 instrument builds, plugin tests pass; not yet tried in a DAW |
 <!-- PLUGINS:END -->
 
 More animals are on the way. Adding one takes a single command (or the `/vst` agent skill), see [Adding a plugin](#adding-a-plugin).
@@ -169,6 +170,36 @@ plugin without an animal.
 </p>
 
 > Screenshot from `AA_SCREENSHOT_DIR=docs/images ./build/plugins/cosmos/CosmosTests "cosmos: editor renders headlessly"`.
+
+## Swan
+
+A chord instrument you play from the computer keyboard. Letter keys pick the root, number keys the chord, and on
+every change each note glides into its place in the new chord, so progressions melt into each other: deep and
+melodic house pads, tech house stabs, ambient swells, emotional keys.
+
+- **Roots** on Ableton's own computer-keyboard layout: `A W S E D F T G Y H U J` = C to B, or click the on-screen
+  keys, or play MIDI notes (any octave picks the root). Hold several: letting go of the newest falls back to the one
+  still held.
+- **Chords** on the number row: `1` MAJ, `2` MIN, `3` 7, `4` MAJ7, `5` MIN7, `6` SUS2, `7` SUS4, `8` DIM, `9` ADD9,
+  `0` MIN9 (also the CHORD pills, automatable). Changing the chord while one sounds glides into it.
+- **Voice leading**: 3 to 6 voices; each chord change tries every way of handing the chord tones to the voices and
+  keeps the one that moves least (with small nudges toward the root in the bass, against unisons, and toward the
+  register centre). Common tones hold, the rest step to the nearest note.
+- **GLIDE** 0 to 2000 ms, all voices arriving together; **CURVE** from an even slide to a fast swoop that eases onto
+  the note.
+- **MODE**: PAD swells and glides legato; STAB and KEYS strike again on every chord (with a filter blip) and still
+  glide. **TONE** low-pass, **WIDTH** detune and stereo fan, **SPACE** reverb, **LEVEL**. `Z` / `X` octave,
+  `L` latch.
+- **Sound**: two detuned band-limited saws per voice into one shared envelope, filter (`dsp::Svf`) and reverb
+  (`dsp::FdnReverb`).
+- Load it on a MIDI track in Live and click its window so it has keyboard focus. Live's own computer MIDI keyboard
+  (the `M` key) and its shortcuts like space still go to Live.
+
+<p align="center">
+  <img src="docs/images/swan-ui.png" alt="Swan by Animal Audio" width="760">
+</p>
+
+> Screenshot from `AA_SCREENSHOT_DIR=docs/images ./build/plugins/swan/SwanTests "swan: editor renders headlessly"`.
 
 ## Build
 

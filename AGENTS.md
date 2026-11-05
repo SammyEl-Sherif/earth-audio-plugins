@@ -15,6 +15,7 @@ Stack: **JUCE 8 + CMake (C++17)**, Catch2 for tests. VST3 only (Standalone optio
 | Turtle Time (half-time / time warp) | `plugins/turtletime` | `TurtleTime` (`TurtleTime_VST3`), tests: `TurtleTimeTests` | `Turt` |
 | Parrot (pitch / formant voice bender) | `plugins/parrot` | `Parrot` (`Parrot_VST3`), tests: `ParrotTests` | `Parr` |
 | Cosmos (granular looper / multi-effect) | `plugins/cosmos` | `Cosmos` (`Cosmos_VST3`), tests: `CosmosTests` | `Cosm` |
+| Swan (keyboard chord instrument with glide) | `plugins/swan` | `Swan` (`Swan_VST3`), tests: `SwanTests` | `Swan` |
 
 New plugins: use the **`/vst <name or idea>`** skill (see [Creating a plugin with `/vst`](#creating-a-plugin-with-vst)).
 
@@ -37,7 +38,8 @@ Contributors never need Apple or Supabase credentials and never edit release scr
 ```
 CMakeLists.txt        options + FetchContent + auto-discovers plugins/*/CMakeLists.txt
 cmake/                FetchDependencies.cmake (JUCE/Catch2 pins), AnimalAudioPlugin.cmake (aa_add_plugin;
-                      NEEDS_MIDI_INPUT TRUE for effects that take MIDI notes, like Parrot)
+                      NEEDS_MIDI_INPUT TRUE for effects that take MIDI notes, like Parrot; IS_SYNTH TRUE for
+                      instruments, like Swan: VST3 category Instrument|Synth, no audio input)
 shared/dsp/           animalaudio::dsp  INTERFACE, pure C++17, NO JUCE. Tests in shared/dsp/tests
   Smoothing.h         OnePoleSmoother (parameter/gain declick)
   TempoSync.h         Division (1/8..1/1), beatsPerCycle, PhaseTracker (host-locked or free-run phase), bpmOr
@@ -57,6 +59,7 @@ shared/core/          animalaudio::core INTERFACE (sources compile into each plu
   CurveShaperProcessor  base AudioProcessor: standard params (division, mix, fallbackBpm), state save/restore,
                       transport + phase plumbing; GainShaperProcessor = same with CurveGainShaper DSP
   TransportReader.h   AudioPlayHead -> dsp::TransportInfo
+  ParameterFactory.h  percentParameter (0..1 shown as %), unitParameter (skewed float with unit + read-out)
 shared/ui/            animalaudio::ui   INTERFACE lib whose .cpp files compile into each plugin
   Palette.h           colour roles every widget draws from; makePaletteFromHue(); makeFont(height, bold, kerning)
   Theme.h             Theme { Palette, name, tagline, Motif }; Motif = the animal (mascot, knob cap, ambient, decoration)
@@ -93,6 +96,13 @@ plugins/cosmos/       granular looper (own processor and editor; the series' one
   m4l/                Max for Live port for Push 3 standalone: cosmos.genexpr (gen~ port of Source/dsp + Svf +
                       FdnReverb), build_amxd.py (patcher, Live params, Push banks -> Cosmos.amxd, `--check`),
                       Cosmos.amxd (built, checked in). Keep in step with Source/dsp; see m4l/README.md
+plugins/swan/         keyboard chord instrument (own processor and editor; the series' first instrument):
+  Source/             SwanProcessor (params, held-root stack, MIDI + editor-key events via a lock-free FIFO),
+                      SwanEditor (computer-key handling, RootKey piano, glide ribbons)
+  Source/dsp/         Chords (10 qualities), VoiceLeader (least-movement voicing), SwanEngine (paraphonic glide synth)
+  Source/ui/          SwanTheme (kThemeHue 262, lilac + bill orange), SwanMotif (swan with S neck, neck knob pointer,
+                      lake ripples)
+  tests/              SwanTests.cpp
 templates/plugin/     starter copied by scripts/new_plugin.py (placeholders __NAME__, __NAME_LOWER__, __HUE__, ...)
 .cursor/skills/       the /setup, /vst and /release skills (canonical);  .claude/skills/ holds copies made by scripts/sync_skills.sh
 scripts/              new_plugin.py, install_plugins.py (+ tests/), verify_plugin.sh, plan_release.py / tag_release.py (semver from conventional commits), release_plugin.sh (any slug; release_win_plugin.ps1 kept, unused in beta), build_mac_pkg.sh, installers/ (mac + win templates), validate/upload release helpers, format.sh, sync_skills.sh, check_repo.sh (docs/RELEASE.md)
@@ -333,6 +343,34 @@ Parrot moves a voice's pitch and formants independently (SHIFT / SNAP / ROBOT) a
   (`accent`), formant blue (`detail`), drive gold (`accentAlt`).
 - Limits: the tube model is physically based, not a copy of any commercial saturator. PSOLA is monophonic: chords
   or doubled voices will warble.
+
+## Swan specifics
+
+Swan is the series' first instrument (`IS_SYNTH TRUE`, `NEEDS_MIDI_INPUT TRUE`, stereo out, no audio input). Roots come
+from computer keys (editor) or MIDI notes; the chord quality is the `chord` parameter.
+
+- Events: the editor posts press / release / release-all-keys into a 128-slot `AbstractFifo`; the audio thread drains
+  it at block start. MIDI is handled sample-accurately (the block is rendered in pieces between events). Both feed one
+  held-root stack (editor keys use sources >= `kKeySourceBase`, MIDI uses the note number); releasing the newest
+  falls back to the next one held, else releases (unless `latch`). A `chord` change re-voices a sounding chord.
+- `VoiceLeader` (JUCE-free, allocation free): enumerates every assignment of chord tones to voices (<= 5^6) that
+  covers all kept tones, each voice taking its tone's octave nearest its old note inside centre +-16. Cost = semitones
+  moved + 3 per unison + 1.5 if the bass is not the root + 0.75 per doubled colour tone + 0.6 x |mean - centre|. With
+  fewer voices than tones the fifth is dropped first, then the ninth. First chord after silence: led from voices
+  spread evenly around the centre.
+- `SwanEngine`: per voice two PolyBLEP saws (detune and pan by WIDTH); one shared envelope, `dsp::Svf` low-pass
+  (TONE 80 Hz..20 kHz plus a per-mode filter envelope) and `dsp::FdnReverb` (SPACE). Pitch, filter and pan update
+  every 8 samples. Glide is constant-time (all voices land together), shaped by CURVE. Only sounding voices glide;
+  after silence a chord starts on its notes. PAD is legato (no re-strike); STAB / KEYS re-strike, the attack rising
+  from the current level so it never jumps.
+- Parameters (APVTS, version 1): `chord` (MAJ..MIN9), `mode` (Pad/Stab/Keys), `voices` (3-6, default 4), `octave`
+  (-2..+2), `glide` (0-2000 ms, default 350), `curve`, `tone`, `width`, `space`, `level` (0-100%), `latch` (bool).
+- UI (`SwanEditor`, 960x600): header (swan, SWAN / CHORD GLIDER, chord symbol and voiced notes, badge); GLIDE display
+  (5 s of voice-pitch ribbons over C-lines, lake ripples); SOUND knobs (`ThemedKnob`, swan-neck cap); ROOT piano with
+  computer-key letters; MODE and VOICES pills; CHORD pills with their number keys, OCTAVE stepper, LATCH. Children never
+  take keyboard focus, so keys always reach the editor; losing focus releases held keys.
+- Limits: paraphonic (one envelope and filter for the chord). Live keeps some keys (space, its own computer MIDI
+  keyboard when on); the editor needs focus to hear keys.
 
 ## Cosmos specifics
 
