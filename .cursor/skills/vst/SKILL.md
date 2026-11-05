@@ -79,7 +79,7 @@ Open this table and decide, for every piece the concept needs, whether it alread
 | curve stored in plugin state, published to audio thread | `core/CurveState.h` |
 | curve to gain engine with scope data | `dsp/CurveGainShaper.h`, `dsp/CycleScope.h` |
 | percent / skewed-unit float parameters with read-outs | `core/ParameterFactory.h` `percentParameter`, `unitParameter` |
-| chord instrument plumbing (computer keys, held-root stack, MIDI roots) | none shared yet; Swan has it in-plugin (`plugins/swan`), extract on second use |
+| chord instrument plumbing (computer keys, held-root stack, MIDI roots, MIDI out of played notes) | none shared yet; Dolphin Flow has it in-plugin (`plugins/dolphinflow`), extract on second use |
 | standard params (division, mix, fallbackBpm), state save/restore, phase/transport plumbing | `core/CurveShaperProcessor.h` (`GainShaperProcessor` for gain effects) |
 | 16 stock curve shapes | `dsp/StandardPresets.h` (you supply names) |
 | curve-shaper editor (optional) | `ui/ShaperEditor.h` + `ui/Theme.h` — use when the UX matches Duck; otherwise a custom editor |
