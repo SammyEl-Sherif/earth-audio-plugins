@@ -50,3 +50,8 @@ python3 plugins/cosmos/m4l/build_amxd.py --check  # fails if Cosmos.amxd is stal
 Keep the GenExpr in step with `Source/dsp` when the engine changes. Parenthesize any expression that chains 3 or
 more operators of mixed precedence, for example `(a > b) && ((c - d) < e)`. GenExpr parsers don't all nest
 these the same way.
+
+Keep user functions flat. Don't call a user function from another user function, don't pass one user function's
+result straight into another, and don't return multiple values. Max's gen~ compiler can mis-type nested user
+function calls and fail with `gen2.dsp.Model:1455: assertion failed`, which silences the whole device. Lookup
+tables live in the `tbl` Data (filled on the first sample) instead.

@@ -33,28 +33,6 @@ catmull(y0, y1, y2, y3, t) {
 	return ((c3 * t + c2) * t + c1) * t + y1;
 }
 
-// xorshift-free LCG on exact doubles: returns the next state and a value in [0, 1).
-rnd(state) {
-	nxt = (state * 1664525 + 1013904223) % 4294967296;
-	return nxt, nxt / 4294967296;
-}
-
-pick3(i, x0, x1, x2) {
-	return i < 0.5 ? x0 : (i < 1.5 ? x1 : x2);
-}
-
-pick4(i, x0, x1, x2, x3) {
-	return i < 0.5 ? x0 : (i < 1.5 ? x1 : (i < 2.5 ? x2 : x3));
-}
-
-pick6(i, x0, x1, x2, x3, x4, x5) {
-	return i < 3.5 ? pick4(i, x0, x1, x2, x3) : (i < 4.5 ? x4 : x5);
-}
-
-pick8(i, x0, x1, x2, x3, x4, x5, x6, x7) {
-	return i < 3.5 ? pick4(i, x0, x1, x2, x3) : pick4(i - 4, x4, x5, x6, x7);
-}
-
 // Grain start so a grain of `span` samples ends just behind the anchor (reverse grains start at it).
 sourcestart(anchorpos, span, speed) {
 	return speed >= 0 ? anchorpos - span - 2 : anchorpos - 2;
@@ -122,6 +100,8 @@ Data hist(1048576, 2);
 Data lbuf(2880000, 2);
 Data gr(24, 11);
 Data pend(32, 8);
+Data tbl(148);
+History tblready(0);
 
 Delay ap0(1024);
 Delay ap1(1024);
@@ -183,6 +163,173 @@ History lastoutr(0);
 
 // ---------- per-sample setup ----------
 
+// Constant tables (one Data, filled on the first sample): T<NAME> is each table's offset.
+TATT = 0;
+TREL = 4;
+TTIMES = 8;
+TSEQ = 14;
+TMOSAIC = 46;
+TGLIDE = 58;
+TARP = 64;
+TSTRUM = 88;
+THAZELO = 104;
+THAZEHI = 108;
+TTUNNEL = 112;
+TWARP = 124;
+TTAPS = 128;
+TTAPG = 144;
+if (tblready < 0.5) {
+	poke(tbl, 0.03, 0);
+	poke(tbl, 0.92, 1);
+	poke(tbl, 0.5, 2);
+	poke(tbl, 0.04, 3);
+	poke(tbl, 0.03, 4);
+	poke(tbl, 0.04, 5);
+	poke(tbl, 0.5, 6);
+	poke(tbl, 0.92, 7);
+	poke(tbl, 0.25, 8);
+	poke(tbl, 0.5, 9);
+	poke(tbl, 1, 10);
+	poke(tbl, 2, 11);
+	poke(tbl, 4, 12);
+	poke(tbl, 8, 13);
+	poke(tbl, 0, 14);
+	poke(tbl, 12, 15);
+	poke(tbl, 7, 16);
+	poke(tbl, 12, 17);
+	poke(tbl, 0, 18);
+	poke(tbl, 12, 19);
+	poke(tbl, 7, 20);
+	poke(tbl, 12, 21);
+	poke(tbl, 0, 22);
+	poke(tbl, 7, 23);
+	poke(tbl, 3, 24);
+	poke(tbl, 10, 25);
+	poke(tbl, 0, 26);
+	poke(tbl, 5, 27);
+	poke(tbl, 7, 28);
+	poke(tbl, 12, 29);
+	poke(tbl, 0, 30);
+	poke(tbl, -12, 31);
+	poke(tbl, 0, 32);
+	poke(tbl, 12, 33);
+	poke(tbl, 0, 34);
+	poke(tbl, -12, 35);
+	poke(tbl, 0, 36);
+	poke(tbl, 12, 37);
+	poke(tbl, 0, 38);
+	poke(tbl, 5, 39);
+	poke(tbl, 7, 40);
+	poke(tbl, 12, 41);
+	poke(tbl, 7, 42);
+	poke(tbl, 5, 43);
+	poke(tbl, 0, 44);
+	poke(tbl, -5, 45);
+	poke(tbl, 1, 46);
+	poke(tbl, 2, 47);
+	poke(tbl, 1, 48);
+	poke(tbl, 0.5, 49);
+	poke(tbl, 1, 50);
+	poke(tbl, 2, 51);
+	poke(tbl, 1, 52);
+	poke(tbl, 1.5, 53);
+	poke(tbl, 2, 54);
+	poke(tbl, -1, 55);
+	poke(tbl, 1, 56);
+	poke(tbl, 2, 57);
+	poke(tbl, -12, 58);
+	poke(tbl, -7, 59);
+	poke(tbl, -5, 60);
+	poke(tbl, 5, 61);
+	poke(tbl, 7, 62);
+	poke(tbl, 12, 63);
+	poke(tbl, 0, 64);
+	poke(tbl, 4, 65);
+	poke(tbl, 7, 66);
+	poke(tbl, 12, 67);
+	poke(tbl, 4, 68);
+	poke(tbl, 7, 69);
+	poke(tbl, 12, 70);
+	poke(tbl, 7, 71);
+	poke(tbl, 4, 72);
+	poke(tbl, 0, 73);
+	poke(tbl, 7, 74);
+	poke(tbl, 4, 75);
+	poke(tbl, 0, 76);
+	poke(tbl, 7, 77);
+	poke(tbl, 12, 78);
+	poke(tbl, 19, 79);
+	poke(tbl, 12, 80);
+	poke(tbl, 7, 81);
+	poke(tbl, 0, 82);
+	poke(tbl, 3, 83);
+	poke(tbl, 7, 84);
+	poke(tbl, 10, 85);
+	poke(tbl, 12, 86);
+	poke(tbl, 15, 87);
+	poke(tbl, 0, 88);
+	poke(tbl, 4, 89);
+	poke(tbl, 7, 90);
+	poke(tbl, 12, 91);
+	poke(tbl, 0, 92);
+	poke(tbl, 3, 93);
+	poke(tbl, 7, 94);
+	poke(tbl, 10, 95);
+	poke(tbl, 0, 96);
+	poke(tbl, 7, 97);
+	poke(tbl, 12, 98);
+	poke(tbl, 19, 99);
+	poke(tbl, 0, 100);
+	poke(tbl, 5, 101);
+	poke(tbl, 10, 102);
+	poke(tbl, 15, 103);
+	poke(tbl, 0.03, 104);
+	poke(tbl, 0.08, 105);
+	poke(tbl, 0.2, 106);
+	poke(tbl, 0.08, 107);
+	poke(tbl, 0.09, 108);
+	poke(tbl, 0.2, 109);
+	poke(tbl, 0.5, 110);
+	poke(tbl, 0.2, 111);
+	poke(tbl, 1, 112);
+	poke(tbl, 0.5, 113);
+	poke(tbl, 1, 114);
+	poke(tbl, 0.5, 115);
+	poke(tbl, 0.25, 116);
+	poke(tbl, 0.5, 117);
+	poke(tbl, 1, 118);
+	poke(tbl, 2, 119);
+	poke(tbl, 1, 120);
+	poke(tbl, 0.5, 121);
+	poke(tbl, 1, 122);
+	poke(tbl, 1.5, 123);
+	poke(tbl, 1, 124);
+	poke(tbl, 2, 125);
+	poke(tbl, 0.5, 126);
+	poke(tbl, -1, 127);
+	poke(tbl, 0.75, 128);
+	poke(tbl, 1, 129);
+	poke(tbl, 1.75, 130);
+	poke(tbl, 2, 131);
+	poke(tbl, 0.5, 132);
+	poke(tbl, 1, 133);
+	poke(tbl, 1.5, 134);
+	poke(tbl, 2, 135);
+	poke(tbl, 0.333333333, 136);
+	poke(tbl, 0.666666667, 137);
+	poke(tbl, 1, 138);
+	poke(tbl, 1.333333333, 139);
+	poke(tbl, 0.25, 140);
+	poke(tbl, 0.75, 141);
+	poke(tbl, 1.25, 142);
+	poke(tbl, 2, 143);
+	poke(tbl, 0.8, 144);
+	poke(tbl, 0.62, 145);
+	poke(tbl, 0.5, 146);
+	poke(tbl, 0.4, 147);
+	tblready = 1;
+}
+
 HN = 1048576;
 NG = 24;
 NP = 32;
@@ -198,13 +345,13 @@ shp = clamp(shape * 0.01, 0, 1);
 shs = shp * 3;
 shi = min(2, floor(shs));
 sht = shs - shi;
-envatt = lerpf(pick3(shi, 0.03, 0.92, 0.5), pick3(shi, 0.92, 0.5, 0.04), sht);
-envrel = lerpf(pick3(shi, 0.03, 0.04, 0.5), pick3(shi, 0.04, 0.5, 0.92), sht);
+envatt = lerpf(peek(tbl, TATT + shi), peek(tbl, TATT + shi + 1), sht);
+envrel = lerpf(peek(tbl, TREL + shi), peek(tbl, TREL + shi + 1), sht);
 
 // Clock: Live's tempo when synced, else our own.
 hosttempo = hostspb > 1 ? 60 * sr / hostspb : tempo;
 bpm = clamp(sync > 0.5 ? hosttempo : tempo, 20, 400);
-mult = pick6(timesel, 0.25, 0.5, 1, 2, 4, 8);
+mult = peek(tbl, TTIMES + clamp(floor(timesel + 0.5), 0, 5));
 stepsamps = clamp(sr * 60 / (bpm * mult), sr * 0.02, sr * 8);
 if ((sync > 0.5) && (hostplaying > 0.5)) {
 	beatphase = clamp(in3, 0, 0.999999);
@@ -434,15 +581,13 @@ if (ticked) {
 		tlen = floor(2 * s);
 	} else if (md == 1) {
 		// Sequence: pitched slices, sometimes ratcheted.
-		tspeed = st2rate(pick4(va,
-			pick8(seqidx % 8, 0, 12, 7, 12, 0, 12, 7, 12),
-			pick8(seqidx % 8, 0, 7, 3, 10, 0, 5, 7, 12),
-			pick8(seqidx % 8, 0, -12, 0, 12, 0, -12, 0, 12),
-			pick8(seqidx % 8, 0, 5, 7, 12, 7, 5, 0, -5)));
+		tspeed = st2rate(peek(tbl, TSEQ + (va * 8) + (seqidx % 8)));
 		seqidx += 1;
-		seed, r0 = rnd(seed);
+		seed = ((seed * 1664525) + 1013904223) % 4294967296;
+		r0 = seed / 4294967296;
 		if (r0 <= (0.45 + (0.55 * act))) {
-			seed, r1 = rnd(seed);
+			seed = ((seed * 1664525) + 1013904223) % 4294967296;
+			r1 = seed / 4294967296;
 			tflag = (act > 0.66) && (r1 < ((act - 0.66) * 2.5));
 			tcount = tflag ? 2 : 1;
 			tlen = floor(s * (tflag ? 0.48 : 0.96));
@@ -451,23 +596,28 @@ if (ticked) {
 		tcount = 1;
 	} else if (md == 6) {
 		// Blocks: replay, reverse, re-speed or reorder whole steps.
-		seed, r0 = rnd(seed);
+		seed = ((seed * 1664525) + 1013904223) % 4294967296;
+		r0 = seed / 4294967296;
 		tflag = r0 < act;
 		tback = 1;
 		tspeed = 1;
 		if (tflag) {
-			seed, r1 = rnd(seed);
+			seed = ((seed * 1664525) + 1013904223) % 4294967296;
+			r1 = seed / 4294967296;
 			tback = 1 + min(3, floor(r1 * 4));
-			seed, r2 = rnd(seed);
+			seed = ((seed * 1664525) + 1013904223) % 4294967296;
+			r2 = seed / 4294967296;
 			if ((va == 1) && (r2 < 0.5)) {
 				tspeed = -1;
 			} else if ((va == 2) && (r2 < 0.4)) {
-				seed, r3 = rnd(seed);
+				seed = ((seed * 1664525) + 1013904223) % 4294967296;
+				r3 = seed / 4294967296;
 				tspeed = r3 < 0.5 ? 0.5 : 2;
 			}
 		}
 		if (va == 3 && tflag) {
-			seed, r4 = rnd(seed);
+			seed = ((seed * 1664525) + 1013904223) % 4294967296;
+			r4 = seed / 4294967296;
 			tcount = r4 < 0.5 ? 2 : 4;
 			tlen = floor(s / tcount);
 		} else {
@@ -476,7 +626,8 @@ if (ticked) {
 		}
 	} else if (md == 7) {
 		// Interrupt: stutter bursts that cut the dry signal.
-		seed, r0 = rnd(seed);
+		seed = ((seed * 1664525) + 1013904223) % 4294967296;
+		r0 = seed / 4294967296;
 		if (r0 <= (0.15 + (0.7 * act))) {
 			bursttil = sampcount + floor(s * 0.95);
 			if (va == 3) {
@@ -513,14 +664,17 @@ if ((tcount > 0) || dostrum || docont) {
 				ok = 1;
 				ln = tlen;
 				if (md == 0) {
-					seed, ra = rnd(seed);
+					seed = ((seed * 1664525) + 1013904223) % 4294967296;
+					ra = seed / 4294967296;
 					if ((k > 0) && (ra > (0.5 + (0.5 * act)))) {
 						ok = 0;
 					} else {
-						seed, rb = rnd(seed);
+						seed = ((seed * 1664525) + 1013904223) % 4294967296;
+						rb = seed / 4294967296;
 						ri = min(2, floor(rb * 3));
-						sp = pick4(va, pick3(ri, 1, 2, 1), pick3(ri, 0.5, 1, 2), pick3(ri, 1, 1.5, 2), pick3(ri, -1, 1, 2));
-						seed, rc = rnd(seed);
+						sp = peek(tbl, TMOSAIC + (va * 3) + ri);
+						seed = ((seed * 1664525) + 1013904223) % 4294967296;
+						rc = seed / 4294967296;
 						st = sourcestart(anchor, ln * abs(sp), sp);
 						gn = tgain;
 						pn = rc * 1.4 - 0.7;
@@ -538,20 +692,22 @@ if ((tcount > 0) || dostrum || docont) {
 					}
 				} else if (md == 2) {
 					// Glide: loops that slide in pitch over two steps.
-					seed, ra = rnd(seed);
+					seed = ((seed * 1664525) + 1013904223) % 4294967296;
+					ra = seed / 4294967296;
 					semis = 12;
 					if (va == 1) {
 						semis = -12;
 					} else if (va == 2) {
 						semis = stepi % 2 == 1 ? -12 : 12;
 					} else if (va == 3) {
-						semis = pick6(min(5, floor(ra * 6)), -12, -7, -5, 5, 7, 12);
+						semis = peek(tbl, TGLIDE + min(5, floor(ra * 6)));
 					}
 					gl = st2rate(semis * (0.25 + 0.75 * act));
 					ln = floor(2 * s);
 					span = ln * (gl - 1) / log(gl);
 					st = sourcestart(anchor, span, 1);
-					seed, rb = rnd(seed);
+					seed = ((seed * 1664525) + 1013904223) % 4294967296;
+					rb = seed / 4294967296;
 					gn = 0.55;
 					pn = rb - 0.5;
 				} else if (md == 6) {
@@ -577,13 +733,10 @@ if ((tcount > 0) || dostrum || docont) {
 						dl = k * ln;
 					}
 				} else if (md == 8) {
-					seed, ra = rnd(seed);
+					seed = ((seed * 1664525) + 1013904223) % 4294967296;
+					ra = seed / 4294967296;
 					ai = va == 3 ? min(5, floor(ra * 6)) : arpidx % (va < 1.5 ? 4 : 6);
-					semis = pick4(va,
-						pick6(ai, 0, 4, 7, 12, 4, 7),
-						pick6(ai, 12, 7, 4, 0, 7, 4),
-						pick6(ai, 0, 7, 12, 19, 12, 7),
-						pick6(ai, 0, 3, 7, 10, 12, 15));
+					semis = peek(tbl, TARP + (va * 6) + ai);
 					arpidx += 1;
 					sp = st2rate(semis);
 					pn = arpidx % 2 == 1 ? 0.4 : -0.4;
@@ -599,11 +752,7 @@ if ((tcount > 0) || dostrum || docont) {
 				// Strum: a four-note chord, alternately up and down.
 				nk = k - 8;
 				note = strumup > 0.5 ? nk : 3 - nk;
-				sp = st2rate(pick4(va,
-					pick4(note, 0, 4, 7, 12),
-					pick4(note, 0, 3, 7, 10),
-					pick4(note, 0, 7, 12, 19),
-					pick4(note, 0, 5, 10, 15)));
+				sp = st2rate(peek(tbl, TSTRUM + (va * 4) + note));
 				ln = strumlen;
 				pn = -0.6 + 0.4 * note;
 				dl = nk * strumstagger;
@@ -618,13 +767,18 @@ if ((tcount > 0) || dostrum || docont) {
 			ok = 1;
 			if (md == 3) {
 				// Haze: a dense cloud of short grains.
-				seed, ra = rnd(seed);
-				seed, rb = rnd(seed);
-				seed, rc = rnd(seed);
-				seed, rd = rnd(seed);
-				seed, re = rnd(seed);
+				seed = ((seed * 1664525) + 1013904223) % 4294967296;
+				ra = seed / 4294967296;
+				seed = ((seed * 1664525) + 1013904223) % 4294967296;
+				rb = seed / 4294967296;
+				seed = ((seed * 1664525) + 1013904223) % 4294967296;
+				rc = seed / 4294967296;
+				seed = ((seed * 1664525) + 1013904223) % 4294967296;
+				rd = seed / 4294967296;
+				seed = ((seed * 1664525) + 1013904223) % 4294967296;
+				re = seed / 4294967296;
 				interval = lerpf(0.15, 0.010, pow(act, 0.7)) * (0.5 + ra);
-				secs = lerpf(pick4(va, 0.03, 0.08, 0.2, 0.08), pick4(va, 0.09, 0.2, 0.5, 0.2), rb);
+				secs = lerpf(peek(tbl, THAZELO + va), peek(tbl, THAZEHI + va), rb);
 				sp = st2rate((rc * 2 - 1) * 0.12);
 				if (va == 3) {
 					sp *= rd < 0.35 ? 2 : (rd < 0.5 ? 0.5 : 1);
@@ -632,20 +786,26 @@ if ((tcount > 0) || dostrum || docont) {
 				ln = floor(sr * secs);
 				gn = 0.9 / sqrt(max(1, secs / interval));
 				st = sourcestart(anchor, ln * sp + floor(sr * re * 1.5), sp);
-				seed, rf = rnd(seed);
+				seed = ((seed * 1664525) + 1013904223) % 4294967296;
+				rf = seed / 4294967296;
 				pn = rf * 2 - 1;
 				contcd = interval * sr;
 			} else if (md == 4) {
 				// Tunnel: long overlapping grains, a drone.
-				seed, ra = rnd(seed);
-				seed, rb = rnd(seed);
-				seed, rc = rnd(seed);
-				seed, rd = rnd(seed);
-				seed, re = rnd(seed);
+				seed = ((seed * 1664525) + 1013904223) % 4294967296;
+				ra = seed / 4294967296;
+				seed = ((seed * 1664525) + 1013904223) % 4294967296;
+				rb = seed / 4294967296;
+				seed = ((seed * 1664525) + 1013904223) % 4294967296;
+				rc = seed / 4294967296;
+				seed = ((seed * 1664525) + 1013904223) % 4294967296;
+				rd = seed / 4294967296;
+				seed = ((seed * 1664525) + 1013904223) % 4294967296;
+				re = seed / 4294967296;
 				interval = lerpf(0.45, 0.07, act) * (0.7 + 0.6 * ra);
 				secs = 0.8 + 1.2 * rb;
 				ri = min(2, floor(rc * 3));
-				sp = pick4(va, pick3(ri, 1, 0.5, 1), pick3(ri, 0.5, 0.25, 0.5), pick3(ri, 1, 2, 1), pick3(ri, 0.5, 1, 1.5));
+				sp = peek(tbl, TTUNNEL + (va * 3) + ri);
 				ln = floor(sr * secs);
 				gn = 0.7 / sqrt(max(1, secs / interval));
 				st = sourcestart(anchor, ln * sp + floor(sr * (0.05 + 0.55 * rd)), sp);
@@ -653,11 +813,12 @@ if ((tcount > 0) || dostrum || docont) {
 				contcd = interval * sr;
 			} else {
 				// Warp: overlapping pitch-shift grains reading one step back, bent by ACTIVITY.
-				seed, ra = rnd(seed);
+				seed = ((seed * 1664525) + 1013904223) % 4294967296;
+				ra = seed / 4294967296;
 				wdelay = min(s, sr * 8);
 				ln = floor(clamp(wdelay, sr * 0.06, sr * 1));
 				cents = (ra * 2 - 1) * 30 * act;
-				sp = pick4(va, 1, 2, 0.5, -1) * st2rate(cents / 100);
+				sp = peek(tbl, TWARP + va) * st2rate(cents / 100);
 				st = anchor - wdelay - 2;
 				if (sp > 1) {
 					st -= (sp - 1) * ln;
@@ -838,11 +999,7 @@ if (taplevel > 0) {
 	modsamps = lfo * 0.003 * sr;
 	for (k = 0; k < 4; k += 1) {
 		if (k < tapcount) {
-			tstep = pick4(va,
-				pick4(k, 0.75, 1, 1.75, 2),
-				pick4(k, 0.5, 1, 1.5, 2),
-				pick4(k, 1 / 3, 2 / 3, 1, 4 / 3),
-				pick4(k, 0.25, 0.75, 1.25, 2));
+			tstep = peek(tbl, TTAPS + (va * 4) + k);
 			tdl = clamp((tstep * tapunit) + (modsamps * (k + 1) * 0.5), 4, longest);
 			tpos = anchor - tdl;
 			fl = floor(tpos);
@@ -853,7 +1010,7 @@ if (taplevel > 0) {
 			i3 = wrap(i1 + 2, 0, HN);
 			tl = catmull(peek(hist, i0, 0), peek(hist, i1, 0), peek(hist, i2, 0), peek(hist, i3, 0), ft);
 			tr = catmull(peek(hist, i0, 1), peek(hist, i1, 1), peek(hist, i2, 1), peek(hist, i3, 1), ft);
-			tg = pick4(k, 0.8, 0.62, 0.5, 0.4) * taplevel;
+			tg = peek(tbl, TTAPG + k) * taplevel;
 			if (k % 2 == 1) {
 				wetl += 0.35 * tg * tl;
 				wetr += tg * tr;
