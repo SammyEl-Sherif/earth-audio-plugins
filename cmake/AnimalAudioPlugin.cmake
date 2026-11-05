@@ -4,13 +4,14 @@
 #     [DESCRIPTION  "..."]
 #     [IS_SYNTH FALSE]          # TRUE: an instrument (VST3 category Instrument|Synth, no audio input needed)
 #     [NEEDS_MIDI_INPUT FALSE]  # TRUE gives the effect a MIDI input (e.g. notes that steer it)
+#     [NEEDS_MIDI_OUTPUT FALSE] # TRUE gives it a MIDI output (e.g. an instrument's played notes, for recording)
 #     [BUNDLE_ID    com.animalaudio.duck]
 #     SOURCES       a.cpp b.cpp ...)
 #
 # Wraps juce_add_plugin with the Animal Audio defaults (manufacturer, VST3 only,
 # Ableton-friendly category, shared libs linked, warnings on).
 function(aa_add_plugin target)
-    cmake_parse_arguments(AA "" "PRODUCT_NAME;PLUGIN_CODE;DESCRIPTION;IS_SYNTH;NEEDS_MIDI_INPUT;BUNDLE_ID;VERSION"
+    cmake_parse_arguments(AA "" "PRODUCT_NAME;PLUGIN_CODE;DESCRIPTION;IS_SYNTH;NEEDS_MIDI_INPUT;NEEDS_MIDI_OUTPUT;BUNDLE_ID;VERSION"
                           "SOURCES" ${ARGN})
 
     if(NOT AA_PRODUCT_NAME OR NOT AA_PLUGIN_CODE)
@@ -21,6 +22,9 @@ function(aa_add_plugin target)
     endif()
     if(NOT AA_NEEDS_MIDI_INPUT)
         set(AA_NEEDS_MIDI_INPUT FALSE)
+    endif()
+    if(NOT AA_NEEDS_MIDI_OUTPUT)
+        set(AA_NEEDS_MIDI_OUTPUT FALSE)
     endif()
     if(NOT AA_IS_SYNTH)
         set(AA_IS_SYNTH FALSE)
@@ -59,7 +63,7 @@ function(aa_add_plugin target)
         VST3_CATEGORIES ${_vst3_categories}
         IS_SYNTH ${AA_IS_SYNTH}
         NEEDS_MIDI_INPUT ${AA_NEEDS_MIDI_INPUT}
-        NEEDS_MIDI_OUTPUT FALSE
+        NEEDS_MIDI_OUTPUT ${AA_NEEDS_MIDI_OUTPUT}
         DESCRIPTION "${AA_DESCRIPTION}"
         COPY_PLUGIN_AFTER_BUILD ${AA_COPY_PLUGINS_AFTER_BUILD})
 
