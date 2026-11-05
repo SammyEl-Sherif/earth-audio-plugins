@@ -18,6 +18,7 @@ on:
         default: duck
         options: # plugin-slugs
           - cosmos
+          - dolphinflow
           - duck
           - parrot
           - turtletime

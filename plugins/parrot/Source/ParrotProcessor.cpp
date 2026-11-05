@@ -2,6 +2,8 @@
 
 #include "ParrotEditor.h"
 
+#include <animalaudio/core/ParameterFactory.h>
+
 #include <algorithm>
 #include <cmath>
 
@@ -16,10 +18,7 @@ juce::String formatSemitones(float value)
 
 namespace
 {
-juce::String percentText(float value)
-{
-    return juce::String(juce::roundToInt(value * 100.0f)) + " %";
-}
+using animalaudio::core::percentParameter;
 
 std::unique_ptr<juce::AudioParameterFloat> shiftParameter(const juce::ParameterID& id, const juce::String& name)
 {
@@ -29,16 +28,6 @@ std::unique_ptr<juce::AudioParameterFloat> shiftParameter(const juce::ParameterI
             .withLabel("st")
             .withStringFromValueFunction([](float value, int) { return formatSemitones(value); })
             .withValueFromStringFunction([](const juce::String& text) { return text.getFloatValue(); }));
-}
-
-std::unique_ptr<juce::AudioParameterFloat> percentParameter(const juce::ParameterID& id, const juce::String& name,
-                                                            float defaultValue)
-{
-    return std::make_unique<juce::AudioParameterFloat>(
-        id, name, juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), defaultValue,
-        juce::AudioParameterFloatAttributes()
-            .withStringFromValueFunction([](float value, int) { return percentText(value); })
-            .withValueFromStringFunction([](const juce::String& text) { return text.getFloatValue() * 0.01f; }));
 }
 
 juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()

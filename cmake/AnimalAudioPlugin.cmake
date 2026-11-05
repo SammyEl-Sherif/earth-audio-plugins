@@ -2,15 +2,16 @@
 #     PRODUCT_NAME  "Duck"
 #     PLUGIN_CODE   Duck          # unique 4 chars, at least one uppercase
 #     [DESCRIPTION  "..."]
-#     [IS_SYNTH FALSE]
+#     [IS_SYNTH FALSE]          # TRUE: an instrument (VST3 category Instrument|Synth, no audio input needed)
 #     [NEEDS_MIDI_INPUT FALSE]  # TRUE gives the effect a MIDI input (e.g. notes that steer it)
+#     [NEEDS_MIDI_OUTPUT FALSE] # TRUE gives it a MIDI output (e.g. an instrument's played notes, for recording)
 #     [BUNDLE_ID    com.animalaudio.duck]
 #     SOURCES       a.cpp b.cpp ...)
 #
 # Wraps juce_add_plugin with the Animal Audio defaults (manufacturer, VST3 only,
 # Ableton-friendly category, shared libs linked, warnings on).
 function(aa_add_plugin target)
-    cmake_parse_arguments(AA "" "PRODUCT_NAME;PLUGIN_CODE;DESCRIPTION;IS_SYNTH;NEEDS_MIDI_INPUT;BUNDLE_ID;VERSION"
+    cmake_parse_arguments(AA "" "PRODUCT_NAME;PLUGIN_CODE;DESCRIPTION;IS_SYNTH;NEEDS_MIDI_INPUT;NEEDS_MIDI_OUTPUT;BUNDLE_ID;VERSION"
                           "SOURCES" ${ARGN})
 
     if(NOT AA_PRODUCT_NAME OR NOT AA_PLUGIN_CODE)
@@ -22,6 +23,9 @@ function(aa_add_plugin target)
     if(NOT AA_NEEDS_MIDI_INPUT)
         set(AA_NEEDS_MIDI_INPUT FALSE)
     endif()
+    if(NOT AA_NEEDS_MIDI_OUTPUT)
+        set(AA_NEEDS_MIDI_OUTPUT FALSE)
+    endif()
     if(NOT AA_IS_SYNTH)
         set(AA_IS_SYNTH FALSE)
     endif()
@@ -29,6 +33,13 @@ function(aa_add_plugin target)
         string(TOLOWER "${AA_PRODUCT_NAME}" _lower)
         string(REGEX REPLACE "[^a-z0-9]" "" _lower "${_lower}")
         set(AA_BUNDLE_ID "com.animalaudio.${_lower}")
+    endif()
+
+    # Instruments must say so, or Live files them under Audio Effects and gives them no MIDI track slot.
+    if(AA_IS_SYNTH)
+        set(_vst3_categories Instrument Synth)
+    else()
+        set(_vst3_categories Fx)
     endif()
 
     set(_formats VST3)
@@ -49,10 +60,10 @@ function(aa_add_plugin target)
         PLUGIN_MANUFACTURER_CODE AnAu
         PLUGIN_CODE ${AA_PLUGIN_CODE}
         FORMATS ${_formats}
-        VST3_CATEGORIES Fx
+        VST3_CATEGORIES ${_vst3_categories}
         IS_SYNTH ${AA_IS_SYNTH}
         NEEDS_MIDI_INPUT ${AA_NEEDS_MIDI_INPUT}
-        NEEDS_MIDI_OUTPUT FALSE
+        NEEDS_MIDI_OUTPUT ${AA_NEEDS_MIDI_OUTPUT}
         DESCRIPTION "${AA_DESCRIPTION}"
         COPY_PLUGIN_AFTER_BUILD ${AA_COPY_PLUGINS_AFTER_BUILD})
 
