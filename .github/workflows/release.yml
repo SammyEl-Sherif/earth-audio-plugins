@@ -18,9 +18,9 @@ on:
         default: duck
         options: # plugin-slugs
           - cosmos
+          - dolphinflow
           - duck
           - parrot
-          - swan
           - turtletime
       bump:
         description: 'Version: auto = from feat/fix commits since the last tag (fails if none), patch/minor/major = bump, current = re-upload the current version'

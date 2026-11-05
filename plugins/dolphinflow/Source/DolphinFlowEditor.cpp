@@ -1,11 +1,11 @@
-#include "SwanEditor.h"
+#include "DolphinFlowEditor.h"
 
 #include <animalaudio/core/BuildStamp.h>
 
 #include <algorithm>
 #include <cmath>
 
-namespace swan
+namespace dolphinflow
 {
 namespace
 {
@@ -46,7 +46,7 @@ void signGlyph(juce::Graphics& g, juce::Rectangle<float> area, juce::Colour colo
 
 // ---------------------------------------------------------------------------------------------------------------
 
-RootKey::RootKey(SwanProcessor& p, const animalaudio::ui::Palette& palette, int pc)
+RootKey::RootKey(DolphinFlowProcessor& p, const animalaudio::ui::Palette& palette, int pc)
     : processor(p)
     , colours(palette)
     , pitchClass(pc)
@@ -99,19 +99,19 @@ void RootKey::mouseDown(const juce::MouseEvent&)
 {
     down = true;
     repaint();
-    processor.pressRoot(SwanProcessor::kKeySourceBase + 100 + pitchClass, pitchClass);
+    processor.pressRoot(DolphinFlowProcessor::kKeySourceBase + 100 + pitchClass, pitchClass);
 }
 
 void RootKey::mouseUp(const juce::MouseEvent&)
 {
     down = false;
     repaint();
-    processor.releaseRoot(SwanProcessor::kKeySourceBase + 100 + pitchClass);
+    processor.releaseRoot(DolphinFlowProcessor::kKeySourceBase + 100 + pitchClass);
 }
 
 // ---------------------------------------------------------------------------------------------------------------
 
-SwanEditor::SwanEditor(SwanProcessor& plugin)
+DolphinFlowEditor::DolphinFlowEditor(DolphinFlowProcessor& plugin)
     : juce::AudioProcessorEditor(plugin)
     , owner(plugin)
     , theme(ui::makeTheme())
@@ -194,14 +194,14 @@ SwanEditor::SwanEditor(SwanProcessor& plugin)
     startTimerHz(30);
 }
 
-SwanEditor::~SwanEditor()
+DolphinFlowEditor::~DolphinFlowEditor()
 {
     stopTimer();
     releaseHeldKeys();
 }
 
-std::unique_ptr<animalaudio::ui::ChoicePillRow> SwanEditor::makePills(const juce::ParameterID& id,
-                                                                      const juce::String& tooltip, bool upperCase)
+std::unique_ptr<animalaudio::ui::ChoicePillRow>
+DolphinFlowEditor::makePills(const juce::ParameterID& id, const juce::String& tooltip, bool upperCase)
 {
     auto& choice = *dynamic_cast<juce::AudioParameterChoice*>(owner.apvts.getParameter(id.getParamID()));
     auto row = std::make_unique<animalaudio::ui::ChoicePillRow>(choice, theme.palette, tooltip);
@@ -212,7 +212,7 @@ std::unique_ptr<animalaudio::ui::ChoicePillRow> SwanEditor::makePills(const juce
     return row;
 }
 
-juce::Slider& SwanEditor::getKnob(const juce::ParameterID& id)
+juce::Slider& DolphinFlowEditor::getKnob(const juce::ParameterID& id)
 {
     for (auto& slot : knobs)
         if (slot.id.getParamID() == id.getParamID())
@@ -221,20 +221,20 @@ juce::Slider& SwanEditor::getKnob(const juce::ParameterID& id)
     return *knobs.front().knob;
 }
 
-void SwanEditor::stepOctave(int delta)
+void DolphinFlowEditor::stepOctave(int delta)
 {
     const int octave = juce::roundToInt(owner.getParameterValue(ids::octave));
     owner.setParameterFromUi(
         ids::octave, static_cast<float>(std::clamp(octave + delta, -dsp::kMaxOctaveShift, dsp::kMaxOctaveShift)));
 }
 
-void SwanEditor::releaseHeldKeys()
+void DolphinFlowEditor::releaseHeldKeys()
 {
     heldKeyCodes.fill(0);
     owner.releaseAllKeys();
 }
 
-bool SwanEditor::keyPressed(const juce::KeyPress& key)
+bool DolphinFlowEditor::keyPressed(const juce::KeyPress& key)
 {
     const auto mods = key.getModifiers();
     if (mods.isCommandDown() || mods.isCtrlDown() || mods.isAltDown())
@@ -248,7 +248,7 @@ bool SwanEditor::keyPressed(const juce::KeyPress& key)
             if (code == 0) // ignore auto-repeat
             {
                 code = key.getKeyCode();
-                owner.pressRoot(SwanProcessor::kKeySourceBase + pc, pc);
+                owner.pressRoot(DolphinFlowProcessor::kKeySourceBase + pc, pc);
             }
             return true;
         }
@@ -271,7 +271,7 @@ bool SwanEditor::keyPressed(const juce::KeyPress& key)
     return false;
 }
 
-bool SwanEditor::keyStateChanged(bool)
+bool DolphinFlowEditor::keyStateChanged(bool)
 {
     bool handled = false;
     for (int pc = 0; pc < 12; ++pc)
@@ -280,26 +280,26 @@ bool SwanEditor::keyStateChanged(bool)
         if (code != 0 && !keyIsDown(code))
         {
             code = 0;
-            owner.releaseRoot(SwanProcessor::kKeySourceBase + pc);
+            owner.releaseRoot(DolphinFlowProcessor::kKeySourceBase + pc);
             handled = true;
         }
     }
     return handled;
 }
 
-void SwanEditor::focusLost(FocusChangeType)
+void DolphinFlowEditor::focusLost(FocusChangeType)
 {
     // A key let go while another window has focus never reaches us; release rather than leave a chord stuck.
     if (std::any_of(heldKeyCodes.begin(), heldKeyCodes.end(), [](int code) { return code != 0; }))
         releaseHeldKeys();
 }
 
-void SwanEditor::mouseDown(const juce::MouseEvent&)
+void DolphinFlowEditor::mouseDown(const juce::MouseEvent&)
 {
     grabKeyboardFocus();
 }
 
-void SwanEditor::refresh()
+void DolphinFlowEditor::refresh()
 {
     if (!focusGrabbed && isShowing())
     {
@@ -335,7 +335,7 @@ void SwanEditor::refresh()
 
 // ---------------------------------------------------------------------------------------------------------------
 
-void SwanEditor::paintHeader(juce::Graphics& g) const
+void DolphinFlowEditor::paintHeader(juce::Graphics& g) const
 {
     const auto& palette = theme.palette;
     const auto header = getLocalBounds().toFloat().removeFromTop(kHeaderH);
@@ -350,8 +350,8 @@ void SwanEditor::paintHeader(juce::Graphics& g) const
 
     theme.motif->drawMascot(g, {16.0f, 7.0f, 58.0f, 58.0f}, palette);
     g.setColour(palette.text);
-    g.setFont(makeFont(28.0f, true, 0.16f));
-    g.drawText(theme.name, juce::Rectangle<float>(84.0f, 12.0f, 240.0f, 32.0f), juce::Justification::centredLeft,
+    g.setFont(makeFont(24.0f, true, 0.12f));
+    g.drawText(theme.name, juce::Rectangle<float>(84.0f, 12.0f, 250.0f, 32.0f), juce::Justification::centredLeft,
                false);
     g.setColour(palette.textDim);
     g.setFont(makeFont(10.5f, true, 0.3f));
@@ -362,14 +362,22 @@ void SwanEditor::paintHeader(juce::Graphics& g) const
     const auto& engine = owner.getEngine();
     const int root = engine.getRoot();
     const bool audible = root >= 0 && (engine.getEnvelopeLevel() > 0.002f || engine.isGateOn());
-    const auto readout = juce::Rectangle<float>(330.0f, 8.0f, 300.0f, 58.0f);
+    const auto readout = juce::Rectangle<float>(340.0f, 8.0f, 290.0f, 58.0f);
     if (audible)
     {
-        const auto& shape = dsp::chordShape(engine.getShape());
+        // A played voicing that matches no chord shape is shown by its pitch classes.
+        juce::String symbol = juce::String(dsp::pitchClassName(root)) + dsp::chordShape(engine.getShape()).symbol;
+        if (engine.getShape() < 0)
+        {
+            juce::StringArray classes;
+            for (int v = 0; v < engine.getVoiceCount(); ++v)
+                if (const float pitch = engine.getVoicePitch(v); pitch >= 0.0f)
+                    classes.addIfNotAlreadyThere(dsp::pitchClassName(juce::roundToInt(pitch)));
+            symbol = classes.joinIntoString(" ");
+        }
         g.setColour(palette.accent);
         g.setFont(makeFont(30.0f, true, 0.04f));
-        g.drawText(juce::String(dsp::pitchClassName(root)) + shape.symbol, readout.withHeight(36.0f),
-                   juce::Justification::centred, false);
+        g.drawText(symbol, readout.withHeight(36.0f), juce::Justification::centred, false);
         juce::StringArray notes;
         for (int v = 0; v < engine.getVoiceCount(); ++v)
             if (const float pitch = engine.getVoicePitch(v); pitch >= 0.0f)
@@ -386,8 +394,8 @@ void SwanEditor::paintHeader(juce::Graphics& g) const
     }
 }
 
-void SwanEditor::paintPanel(juce::Graphics& g, juce::Rectangle<float> area, const juce::String& title,
-                            const juce::String& hint) const
+void DolphinFlowEditor::paintPanel(juce::Graphics& g, juce::Rectangle<float> area, const juce::String& title,
+                                   const juce::String& hint) const
 {
     const auto& palette = theme.palette;
     constexpr float radius = 8.0f;
@@ -415,7 +423,7 @@ void SwanEditor::paintPanel(juce::Graphics& g, juce::Rectangle<float> area, cons
     }
 }
 
-void SwanEditor::paintRibbons(juce::Graphics& g, juce::Rectangle<float> panel) const
+void DolphinFlowEditor::paintRibbons(juce::Graphics& g, juce::Rectangle<float> panel) const
 {
     const auto& palette = theme.palette;
     const auto area = panel.reduced(14.0f).withTrimmedTop(20.0f);
@@ -492,7 +500,7 @@ void SwanEditor::paintRibbons(juce::Graphics& g, juce::Rectangle<float> panel) c
     }
 }
 
-void SwanEditor::paintKnobLabels(juce::Graphics& g) const
+void DolphinFlowEditor::paintKnobLabels(juce::Graphics& g) const
 {
     const auto& palette = theme.palette;
     for (const auto& slot : knobs)
@@ -511,7 +519,7 @@ void SwanEditor::paintKnobLabels(juce::Graphics& g) const
     }
 }
 
-void SwanEditor::paintChordKeys(juce::Graphics& g) const
+void DolphinFlowEditor::paintChordKeys(juce::Graphics& g) const
 {
     const auto& palette = theme.palette;
     const auto row = chordPills->getBounds().toFloat();
@@ -540,7 +548,7 @@ void SwanEditor::paintChordKeys(juce::Graphics& g) const
     g.drawText("KEY L", latch.withY(row.getY() - 15.0f).withHeight(12.0f), juce::Justification::centred, false);
 }
 
-void SwanEditor::paint(juce::Graphics& g)
+void DolphinFlowEditor::paint(juce::Graphics& g)
 {
     const auto& palette = theme.palette;
     g.fillAll(palette.background);
@@ -564,7 +572,7 @@ void SwanEditor::paint(juce::Graphics& g)
     paintChordKeys(g);
 }
 
-void SwanEditor::resized()
+void DolphinFlowEditor::resized()
 {
     brand.setBounds(getWidth() - 20 - 150, 27, 150, 18);
 
@@ -608,4 +616,4 @@ void SwanEditor::resized()
     octaveUp.setBounds(812, chord.getY() + 46, 28, 30);
     latchButton.setBounds(852, chord.getY() + 46, 72, 30);
 }
-} // namespace swan
+} // namespace dolphinflow

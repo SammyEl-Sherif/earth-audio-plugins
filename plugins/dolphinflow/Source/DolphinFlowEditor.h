@@ -1,7 +1,7 @@
 #pragma once
 
-#include "SwanProcessor.h"
-#include "ui/SwanTheme.h"
+#include "DolphinFlowProcessor.h"
+#include "ui/DolphinFlowTheme.h"
 
 #include <animalaudio/ui/BrandBadge.h>
 #include <animalaudio/ui/ChoicePillRow.h>
@@ -12,7 +12,7 @@
 #include <memory>
 #include <vector>
 
-namespace swan
+namespace dolphinflow
 {
 /** Computer key for each root, Ableton's own layout: A W S E D F T G Y H U J = C .. B. */
 inline constexpr char kRootKeys[12] = {'a', 'w', 's', 'e', 'd', 'f', 't', 'g', 'y', 'h', 'u', 'j'};
@@ -23,7 +23,7 @@ inline constexpr char kChordKeys[dsp::kNumChordShapes] = {'1', '2', '3', '4', '5
 class RootKey : public juce::Component, public juce::SettableTooltipClient
 {
 public:
-    RootKey(SwanProcessor& processor, const animalaudio::ui::Palette& palette, int pitchClass);
+    RootKey(DolphinFlowProcessor& processor, const animalaudio::ui::Palette& palette, int pitchClass);
 
     void paint(juce::Graphics& g) override;
     void mouseDown(const juce::MouseEvent&) override;
@@ -33,22 +33,22 @@ public:
     void setLit(bool shouldBeLit);
 
 private:
-    SwanProcessor& processor;
+    DolphinFlowProcessor& processor;
     animalaudio::ui::Palette colours;
     int pitchClass;
     bool lit = false;
     bool down = false;
 };
 
-class SwanEditor : public juce::AudioProcessorEditor, private juce::Timer
+class DolphinFlowEditor : public juce::AudioProcessorEditor, private juce::Timer
 {
 public:
     static constexpr int kWidth = 960;
     static constexpr int kHeight = 600;
     static constexpr int kHistory = 150; // ribbon points, 5 s at the 30 Hz refresh
 
-    explicit SwanEditor(SwanProcessor& owner);
-    ~SwanEditor() override;
+    explicit DolphinFlowEditor(DolphinFlowProcessor& owner);
+    ~DolphinFlowEditor() override;
 
     void paint(juce::Graphics& g) override;
     void resized() override;
@@ -91,7 +91,7 @@ private:
     void paintKnobLabels(juce::Graphics& g) const;
     void paintChordKeys(juce::Graphics& g) const;
 
-    SwanProcessor& owner;
+    DolphinFlowProcessor& owner;
     animalaudio::ui::Theme theme;
     animalaudio::ui::BrandBadge brand;
     std::vector<KnobSlot> knobs;
@@ -113,6 +113,6 @@ private:
 
     juce::TooltipWindow tooltipWindow{this, 400};
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SwanEditor)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(DolphinFlowEditor)
 };
-} // namespace swan
+} // namespace dolphinflow

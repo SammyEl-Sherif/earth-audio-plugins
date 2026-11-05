@@ -8,7 +8,7 @@
 
 #include <atomic>
 
-namespace swan::dsp
+namespace dolphinflow::dsp
 {
 /** How a chord change sounds. Every mode glides; they differ in envelope and whether a change re-strikes. */
 enum class Mode : int
@@ -44,7 +44,7 @@ struct EngineSettings
  *
  * `prepare` allocates (reverb lines); everything else is allocation free and realtime safe.
  */
-class SwanEngine
+class DolphinFlowEngine
 {
 public:
     static constexpr int kMaxChannels = 2;
@@ -54,8 +54,10 @@ public:
     void reset() noexcept;
     void setSettings(const EngineSettings& settings) noexcept;
 
-    /** Starts the chord, or glides to it if one is already sounding. */
+    /** Starts the chord, or glides to it if one is already sounding. Shape -1 means unnamed (a played voicing). */
     void playChord(int rootPitchClass, int shapeIndex) noexcept;
+    /** Plays exactly these notes (lowest first), each voice gliding from its nearest-ranked old note. */
+    void playVoicing(const Voicing& notes) noexcept;
     /** Lets the chord ring out with the mode's release. */
     void release() noexcept;
     /** Silences at once (host "all sound off"). */
@@ -72,7 +74,8 @@ public:
     float getVoicePitch(int voice) const noexcept;
     float getEnvelopeLevel() const noexcept { return levelShown.load(std::memory_order_relaxed); }
 
-    // Audio-thread view, for tests.
+    // Audio-thread view (processor and tests).
+    bool isHeld() const noexcept { return gate; }
     const Voicing& getVoicing() const noexcept { return voicing; }
     float currentPitch(int voice) const noexcept { return voices[voice].pitch; }
 
@@ -104,6 +107,7 @@ private:
     };
 
     void applyVoicing(const Voicing& next, bool glide) noexcept;
+    void gateOn() noexcept;
     void strike() noexcept;
     void updateControl() noexcept;
     float nextEnvelope() noexcept;
@@ -144,4 +148,4 @@ private:
     std::atomic<float> levelShown{0.0f};
     std::atomic<float> pitchShown[kMaxVoices] = {};
 };
-} // namespace swan::dsp
+} // namespace dolphinflow::dsp

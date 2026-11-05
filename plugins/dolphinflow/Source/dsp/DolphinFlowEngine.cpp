@@ -1,9 +1,9 @@
-#include "SwanEngine.h"
+#include "DolphinFlowEngine.h"
 
 #include <algorithm>
 #include <cmath>
 
-namespace swan::dsp
+namespace dolphinflow::dsp
 {
 namespace
 {
@@ -49,7 +49,7 @@ inline float decayCoefficient(double seconds, double sampleRate) noexcept
 }
 } // namespace
 
-void SwanEngine::prepare(double newSampleRate)
+void DolphinFlowEngine::prepare(double newSampleRate)
 {
     sampleRate = newSampleRate > 0.0 ? newSampleRate : 44100.0;
     reverb.prepare(sampleRate);
@@ -62,7 +62,7 @@ void SwanEngine::prepare(double newSampleRate)
     reset();
 }
 
-void SwanEngine::reset() noexcept
+void DolphinFlowEngine::reset() noexcept
 {
     stage = Stage::Idle;
     level = 0.0f;
@@ -84,7 +84,7 @@ void SwanEngine::reset() noexcept
     publish();
 }
 
-SwanEngine::Envelope SwanEngine::envelopeFor(Mode mode) const noexcept
+DolphinFlowEngine::Envelope DolphinFlowEngine::envelopeFor(Mode mode) const noexcept
 {
     struct Times
     {
@@ -112,14 +112,16 @@ SwanEngine::Envelope SwanEngine::envelopeFor(Mode mode) const noexcept
             t.restrike};
 }
 
-void SwanEngine::setSettings(const EngineSettings& next) noexcept
+void DolphinFlowEngine::setSettings(const EngineSettings& next) noexcept
 {
     EngineSettings clamped = next;
     clamped.voices = std::clamp(next.voices, kMinVoices, kMaxVoices);
     clamped.glideMs = std::clamp(next.glideMs, 0.0f, kMaxGlideMs);
     clamped.curve = std::clamp(next.curve, 0.0f, 1.0f);
 
-    const bool revoice = hasChord && gate && (clamped.voices != settings.voices || clamped.centre != settings.centre);
+    // A played voicing (shape -1) keeps its own notes; only named chords are re-voiced.
+    const bool revoice =
+        hasChord && gate && shape >= 0 && (clamped.voices != settings.voices || clamped.centre != settings.centre);
     settings = clamped;
     envelope = envelopeFor(settings.mode);
     const double glideSamples = settings.glideMs * 0.001 * sampleRate;
@@ -136,7 +138,7 @@ void SwanEngine::setSettings(const EngineSettings& next) noexcept
         applyVoicing(VoiceLeader::lead(voicing, root, shape, settings.voices, settings.centre), true);
 }
 
-void SwanEngine::playChord(int rootPitchClass, int shapeIndex) noexcept
+void DolphinFlowEngine::playChord(int rootPitchClass, int shapeIndex) noexcept
 {
     root = pitchClassOf(rootPitchClass);
     shape = std::clamp(shapeIndex, 0, kNumChordShapes - 1);
@@ -146,21 +148,51 @@ void SwanEngine::playChord(int rootPitchClass, int shapeIndex) noexcept
     const Voicing next = sounding ? VoiceLeader::lead(voicing, root, shape, settings.voices, settings.centre)
                                   : VoiceLeader::initial(root, shape, settings.voices, settings.centre);
     applyVoicing(next, sounding);
-    hasChord = true;
+    gateOn();
+}
 
+void DolphinFlowEngine::playVoicing(const Voicing& notes) noexcept
+{
+    Voicing next;
+    next.count = std::clamp(notes.count, 1, kMaxVoices);
+    std::copy(notes.notes, notes.notes + next.count, next.notes);
+    std::sort(next.notes, next.notes + next.count);
+    identifyChord(next.notes, next.count, root, shape);
+
+    const bool sounding = hasChord && stage != Stage::Idle;
+    if (sounding && voicing.count == next.count)
+    {
+        // Rank the voices by where they are now and hand them the new notes in the same order: no crossing.
+        int order[kMaxVoices] = {};
+        for (int v = 0; v < next.count; ++v)
+            order[v] = v;
+        std::sort(order, order + next.count, [this](int a, int b) { return voices[a].pitch < voices[b].pitch; });
+        Voicing ranked;
+        ranked.count = next.count;
+        for (int i = 0; i < next.count; ++i)
+            ranked.notes[order[i]] = next.notes[i];
+        next = ranked;
+    }
+    applyVoicing(next, sounding);
+    gateOn();
+}
+
+void DolphinFlowEngine::gateOn() noexcept
+{
+    hasChord = true;
     if (!gate || envelope.restrike)
         strike();
     gate = true;
 }
 
-void SwanEngine::release() noexcept
+void DolphinFlowEngine::release() noexcept
 {
     gate = false;
     if (stage != Stage::Idle)
         stage = Stage::Release;
 }
 
-void SwanEngine::kill() noexcept
+void DolphinFlowEngine::kill() noexcept
 {
     gate = false;
     stage = Stage::Idle;
@@ -169,14 +201,14 @@ void SwanEngine::kill() noexcept
     hasChord = false;
 }
 
-void SwanEngine::strike() noexcept
+void DolphinFlowEngine::strike() noexcept
 {
     // Attack rises from wherever the level is, so re-striking a ringing chord does not click.
     stage = Stage::Attack;
     filterEnv = 1.0f;
 }
 
-void SwanEngine::applyVoicing(const Voicing& next, bool glide) noexcept
+void DolphinFlowEngine::applyVoicing(const Voicing& next, bool glide) noexcept
 {
     for (int v = 0; v < next.count; ++v)
     {
@@ -201,7 +233,7 @@ void SwanEngine::applyVoicing(const Voicing& next, bool glide) noexcept
     voiceGain = 0.32f / std::sqrt(static_cast<float>(voicing.count));
 }
 
-void SwanEngine::updateControl() noexcept
+void DolphinFlowEngine::updateControl() noexcept
 {
     const float tone = toneSmoother.next();
     const float width = widthSmoother.next();
@@ -233,7 +265,7 @@ void SwanEngine::updateControl() noexcept
     filter.setCoefficients(cutoff, envelope.q, sampleRate);
 }
 
-float SwanEngine::nextEnvelope() noexcept
+float DolphinFlowEngine::nextEnvelope() noexcept
 {
     switch (stage)
     {
@@ -264,7 +296,7 @@ float SwanEngine::nextEnvelope() noexcept
     return level;
 }
 
-void SwanEngine::process(float* const* channels, int numChannels, int numSamples) noexcept
+void DolphinFlowEngine::process(float* const* channels, int numChannels, int numSamples) noexcept
 {
     numChannels = std::clamp(numChannels, 0, kMaxChannels);
     if (numChannels == 0)
@@ -316,14 +348,14 @@ void SwanEngine::process(float* const* channels, int numChannels, int numSamples
     publish();
 }
 
-float SwanEngine::getVoicePitch(int voice) const noexcept
+float DolphinFlowEngine::getVoicePitch(int voice) const noexcept
 {
     if (voice < 0 || voice >= kMaxVoices)
         return -1.0f;
     return pitchShown[voice].load(std::memory_order_relaxed);
 }
 
-void SwanEngine::publish() noexcept
+void DolphinFlowEngine::publish() noexcept
 {
     const bool audible = stage != Stage::Idle;
     gateShown.store(gate, std::memory_order_relaxed);
@@ -334,4 +366,4 @@ void SwanEngine::publish() noexcept
     for (int v = 0; v < kMaxVoices; ++v)
         pitchShown[v].store(audible && v < voicing.count ? voices[v].pitch : -1.0f, std::memory_order_relaxed);
 }
-} // namespace swan::dsp
+} // namespace dolphinflow::dsp

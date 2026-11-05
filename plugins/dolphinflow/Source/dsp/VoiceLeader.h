@@ -6,7 +6,7 @@
 #include <cmath>
 #include <cstdlib>
 
-namespace swan::dsp
+namespace dolphinflow::dsp
 {
 inline constexpr int kMinVoices = 3;
 inline constexpr int kMaxVoices = 6;
@@ -156,4 +156,4 @@ private:
     static constexpr float kColourDoublingCost = 0.75f;
     static constexpr float kCentreGravity = 0.6f;
 };
-} // namespace swan::dsp
+} // namespace dolphinflow::dsp

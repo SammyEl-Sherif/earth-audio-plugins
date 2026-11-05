@@ -1,6 +1,6 @@
-#include "SwanEditor.h"
-#include "SwanProcessor.h"
-#include "dsp/SwanEngine.h"
+#include "DolphinFlowEditor.h"
+#include "DolphinFlowProcessor.h"
+#include "dsp/DolphinFlowEngine.h"
 #include "dsp/VoiceLeader.h"
 
 #include <animalaudio/core/BuildStamp.h>
@@ -20,11 +20,11 @@
 using animalaudio::testing::largestStep;
 using animalaudio::testing::rms;
 using animalaudio::testing::writePngIfRequested;
-using swan::dsp::EngineSettings;
-using swan::dsp::Mode;
-using swan::dsp::SwanEngine;
-using swan::dsp::VoiceLeader;
-using swan::dsp::Voicing;
+using dolphinflow::dsp::DolphinFlowEngine;
+using dolphinflow::dsp::EngineSettings;
+using dolphinflow::dsp::Mode;
+using dolphinflow::dsp::VoiceLeader;
+using dolphinflow::dsp::Voicing;
 
 namespace
 {
@@ -51,7 +51,7 @@ int totalMovement(const Voicing& from, const Voicing& to)
 bool containsPitchClass(const Voicing& v, int pc)
 {
     for (int i = 0; i < v.count; ++i)
-        if (swan::dsp::pitchClassOf(v.notes[i]) == swan::dsp::pitchClassOf(pc))
+        if (dolphinflow::dsp::pitchClassOf(v.notes[i]) == dolphinflow::dsp::pitchClassOf(pc))
             return true;
     return false;
 }
@@ -61,7 +61,7 @@ struct Render
     std::vector<float> left, right;
 };
 
-void renderInto(SwanEngine& engine, Render& out, int samples, int blockSize = 256)
+void renderInto(DolphinFlowEngine& engine, Render& out, int samples, int blockSize = 256)
 {
     std::vector<float> l(static_cast<std::size_t>(blockSize)), r(static_cast<std::size_t>(blockSize));
     for (int done = 0; done < samples; done += blockSize)
@@ -76,7 +76,7 @@ void renderInto(SwanEngine& engine, Render& out, int samples, int blockSize = 25
 
 struct EngineRig
 {
-    SwanEngine engine;
+    DolphinFlowEngine engine;
     Render out;
 
     explicit EngineRig(EngineSettings settings = {})
@@ -100,20 +100,20 @@ int samplesFor(double seconds)
 
 // ---- chords and voice leading ---------------------------------------------------------------------------------
 
-TEST_CASE("swan: chord shapes are well formed")
+TEST_CASE("dolphinflow: chord shapes are well formed")
 {
-    for (const auto& shape : swan::dsp::kChordShapes)
+    for (const auto& shape : dolphinflow::dsp::kChordShapes)
     {
         REQUIRE(shape.count >= 3);
-        REQUIRE(shape.count <= swan::dsp::kMaxChordTones);
+        REQUIRE(shape.count <= dolphinflow::dsp::kMaxChordTones);
         REQUIRE(shape.intervals[0] == 0);
         for (int i = 1; i < shape.count; ++i)
             REQUIRE(shape.intervals[i] > shape.intervals[i - 1]);
     }
-    REQUIRE(juce::String(swan::dsp::pitchClassName(9)) + swan::dsp::chordShape(4).symbol == "Am7");
+    REQUIRE(juce::String(dolphinflow::dsp::pitchClassName(9)) + dolphinflow::dsp::chordShape(4).symbol == "Am7");
 }
 
-TEST_CASE("swan: C to Am moves one voice up a whole tone")
+TEST_CASE("dolphinflow: C to Am moves one voice up a whole tone")
 {
     const auto c = voicing({60, 64, 67, 72});
     const auto am = VoiceLeader::lead(c, A, kMin, 4, 64);
@@ -129,7 +129,7 @@ TEST_CASE("swan: C to Am moves one voice up a whole tone")
     REQUIRE(moved == 1);
 }
 
-TEST_CASE("swan: C to F holds the common tone")
+TEST_CASE("dolphinflow: C to F holds the common tone")
 {
     const auto c = voicing({60, 64, 67, 72});
     const auto f = VoiceLeader::lead(c, F, kMaj, 4, 64);
@@ -138,7 +138,7 @@ TEST_CASE("swan: C to F holds the common tone")
     REQUIRE(totalMovement(c, f) <= 3);
 }
 
-TEST_CASE("swan: G7 resolves to C by small steps")
+TEST_CASE("dolphinflow: G7 resolves to C by small steps")
 {
     const auto g7 = VoiceLeader::initial(G, kDom7, 4, 60);
     const auto c = VoiceLeader::lead(g7, C, kMaj, 4, 60);
@@ -147,14 +147,14 @@ TEST_CASE("swan: G7 resolves to C by small steps")
     REQUIRE(totalMovement(g7, c) <= 7);
 }
 
-TEST_CASE("swan: every chord tone sounds, and thin voicings drop the fifth first")
+TEST_CASE("dolphinflow: every chord tone sounds, and thin voicings drop the fifth first")
 {
     const int voices = GENERATE(3, 4, 5, 6);
-    const int shape = GENERATE(Catch::Generators::range(0, swan::dsp::kNumChordShapes));
+    const int shape = GENERATE(Catch::Generators::range(0, dolphinflow::dsp::kNumChordShapes));
     const int root = GENERATE(C, E, A);
     const auto chord = VoiceLeader::initial(root, shape, voices, 60);
     REQUIRE(chord.count == voices);
-    const auto& tones = swan::dsp::chordShape(shape);
+    const auto& tones = dolphinflow::dsp::chordShape(shape);
     for (int i = 0; i < tones.count; ++i)
     {
         const bool dropped = voices < tones.count && (i == 2 || (voices == 3 && i == 4));
@@ -163,7 +163,7 @@ TEST_CASE("swan: every chord tone sounds, and thin voicings drop the fifth first
     }
 }
 
-TEST_CASE("swan: a minor nine on three voices keeps root, third and seventh")
+TEST_CASE("dolphinflow: a minor nine on three voices keeps root, third and seventh")
 {
     const auto chord = VoiceLeader::initial(D, kMin9, 3, 60);
     REQUIRE(containsPitchClass(chord, D));
@@ -171,7 +171,7 @@ TEST_CASE("swan: a minor nine on three voices keeps root, third and seventh")
     REQUIRE(containsPitchClass(chord, C));
 }
 
-TEST_CASE("swan: long progressions stay in range, close and repeatable")
+TEST_CASE("dolphinflow: long progressions stay in range, close and repeatable")
 {
     const int voices = GENERATE(3, 4, 6);
     const int centre = GENERATE(48, 60, 72);
@@ -181,13 +181,13 @@ TEST_CASE("swan: long progressions stay in range, close and repeatable")
     for (int step = 0; step < 400; ++step)
     {
         const int root = std::rand() % 12;
-        const int shape = std::rand() % swan::dsp::kNumChordShapes;
+        const int shape = std::rand() % dolphinflow::dsp::kNumChordShapes;
         const auto next = VoiceLeader::lead(current, root, shape, voices, centre);
         REQUIRE(VoiceLeader::lead(replay, root, shape, voices, centre).notes[0] == next.notes[0]);
         for (int v = 0; v < voices; ++v)
         {
-            REQUIRE(next.notes[v] >= centre - swan::dsp::kRangeHalfWidth);
-            REQUIRE(next.notes[v] <= centre + swan::dsp::kRangeHalfWidth);
+            REQUIRE(next.notes[v] >= centre - dolphinflow::dsp::kRangeHalfWidth);
+            REQUIRE(next.notes[v] <= centre + dolphinflow::dsp::kRangeHalfWidth);
             REQUIRE(std::abs(next.notes[v] - current.notes[v]) <= 12);
         }
         current = replay = next;
@@ -196,7 +196,7 @@ TEST_CASE("swan: long progressions stay in range, close and repeatable")
 
 // ---- engine ------------------------------------------------------------------------------------------------
 
-TEST_CASE("swan: every voice glides and they land together")
+TEST_CASE("dolphinflow: every voice glides and they land together")
 {
     EngineSettings settings;
     settings.glideMs = 200.0f;
@@ -231,7 +231,7 @@ TEST_CASE("swan: every voice glides and they land together")
         REQUIRE(rig.engine.currentPitch(v) == Catch::Approx(static_cast<float>(after.notes[v])));
 }
 
-TEST_CASE("swan: zero glide jumps, and a chord after silence starts on its notes")
+TEST_CASE("dolphinflow: zero glide jumps, and a chord after silence starts on its notes")
 {
     EngineSettings settings;
     settings.glideMs = 0.0f;
@@ -254,7 +254,7 @@ TEST_CASE("swan: zero glide jumps, and a chord after silence starts on its notes
         REQUIRE(rig.engine.currentPitch(v) == static_cast<float>(rig.engine.getVoicing().notes[v]));
 }
 
-TEST_CASE("swan: block size does not change the render")
+TEST_CASE("dolphinflow: block size does not change the render")
 {
     const int blockSize = GENERATE(1, 37, 512);
     const auto play = [](int block)
@@ -278,7 +278,7 @@ TEST_CASE("swan: block size does not change the render")
     REQUIRE(worst < 1.0e-5f);
 }
 
-TEST_CASE("swan: chord changes glide without clicks")
+TEST_CASE("dolphinflow: chord changes glide without clicks")
 {
     const auto mode = GENERATE(Mode::Pad, Mode::Stab, Mode::Keys);
     EngineSettings settings;
@@ -303,7 +303,7 @@ TEST_CASE("swan: chord changes glide without clicks")
         REQUIRE(std::isfinite(s));
 }
 
-TEST_CASE("swan: sound is in a sensible range and goes silent after release")
+TEST_CASE("dolphinflow: sound is in a sensible range and goes silent after release")
 {
     EngineSettings settings;
     settings.space = 0.0f;
@@ -329,7 +329,7 @@ TEST_CASE("swan: sound is in a sensible range and goes silent after release")
     REQUIRE(rms(rig.out.left, rig.out.left.size() - 1000, rig.out.left.size()) < 1.0e-5);
 }
 
-TEST_CASE("swan: stab mode strikes again on every chord")
+TEST_CASE("dolphinflow: stab mode strikes again on every chord")
 {
     EngineSettings settings;
     settings.mode = Mode::Stab;
@@ -343,7 +343,7 @@ TEST_CASE("swan: stab mode strikes again on every chord")
     REQUIRE(rig.engine.getEnvelopeLevel() > 0.5f);
 }
 
-TEST_CASE("swan: octave and voice count changes re-voice a held chord")
+TEST_CASE("dolphinflow: octave and voice count changes re-voice a held chord")
 {
     EngineRig rig;
     rig.engine.playChord(C, kMaj);
@@ -353,7 +353,7 @@ TEST_CASE("swan: octave and voice count changes re-voice a held chord")
     rig.engine.setSettings(settings);
     rig.run(1.0);
     for (int v = 0; v < rig.engine.getVoicing().count; ++v)
-        REQUIRE(rig.engine.getVoicing().notes[v] >= 72 - swan::dsp::kRangeHalfWidth);
+        REQUIRE(rig.engine.getVoicing().notes[v] >= 72 - dolphinflow::dsp::kRangeHalfWidth);
     settings.voices = 6;
     rig.engine.setSettings(settings);
     rig.run(0.01);
@@ -364,7 +364,7 @@ TEST_CASE("swan: octave and voice count changes re-voice a held chord")
 
 namespace
 {
-using Harness = animalaudio::testing::ProcessorHarness<swan::SwanProcessor>;
+using Harness = animalaudio::testing::ProcessorHarness<dolphinflow::DolphinFlowProcessor>;
 
 void processBlock(Harness& h, int samples = 512)
 {
@@ -374,31 +374,31 @@ void processBlock(Harness& h, int samples = 512)
     h.midi.clear();
 }
 
-float paramValue(swan::SwanProcessor& p, const juce::ParameterID& id)
+float paramValue(dolphinflow::DolphinFlowProcessor& p, const juce::ParameterID& id)
 {
     return p.getParameterValue(id);
 }
 } // namespace
 
-TEST_CASE("swan: parameters exist with their defaults")
+TEST_CASE("dolphinflow: parameters exist with their defaults")
 {
-    swan::SwanProcessor processor;
-    REQUIRE(paramValue(processor, swan::ids::chord) == 0.0f);
-    REQUIRE(paramValue(processor, swan::ids::mode) == 0.0f);
-    REQUIRE(paramValue(processor, swan::ids::voices) == 1.0f);
-    REQUIRE(paramValue(processor, swan::ids::octave) == 0.0f);
-    REQUIRE(paramValue(processor, swan::ids::glide) == Catch::Approx(350.0f));
-    REQUIRE(paramValue(processor, swan::ids::latch) == 0.0f);
-    REQUIRE(processor.apvts.getParameter(swan::ids::level.getParamID())->getCurrentValueAsText() == "70 %");
+    dolphinflow::DolphinFlowProcessor processor;
+    REQUIRE(paramValue(processor, dolphinflow::ids::chord) == 0.0f);
+    REQUIRE(paramValue(processor, dolphinflow::ids::mode) == 0.0f);
+    REQUIRE(paramValue(processor, dolphinflow::ids::voices) == 1.0f);
+    REQUIRE(paramValue(processor, dolphinflow::ids::octave) == 0.0f);
+    REQUIRE(paramValue(processor, dolphinflow::ids::glide) == Catch::Approx(350.0f));
+    REQUIRE(paramValue(processor, dolphinflow::ids::latch) == 0.0f);
+    REQUIRE(processor.apvts.getParameter(dolphinflow::ids::level.getParamID())->getCurrentValueAsText() == "70 %");
     REQUIRE(processor.acceptsMidi());
     REQUIRE(processor.getTotalNumInputChannels() == 0);
     REQUIRE(processor.getTotalNumOutputChannels() == 2);
 }
 
-TEST_CASE("swan: MIDI notes pick the root, CHORD picks the quality")
+TEST_CASE("dolphinflow: MIDI notes pick the root, CHORD picks the quality")
 {
     Harness h(kRate, 512);
-    h.setParam(swan::ids::chord, 4.0f); // min7
+    h.setParam(dolphinflow::ids::chord, 4.0f); // min7
     h.midi.addEvent(juce::MidiMessage::noteOn(1, 57, 0.8f), 100);
     processBlock(h);
     const auto& engine = h.processor.getEngine();
@@ -418,28 +418,28 @@ TEST_CASE("swan: MIDI notes pick the root, CHORD picks the quality")
     REQUIRE_FALSE(engine.isGateOn());
 }
 
-TEST_CASE("swan: changing CHORD re-voices the held chord; LATCH holds after release")
+TEST_CASE("dolphinflow: changing CHORD re-voices the held chord; LATCH holds after release")
 {
     Harness h(kRate, 512);
     h.midi.addEvent(juce::MidiMessage::noteOn(1, 60, 0.8f), 0);
     processBlock(h);
-    h.setParam(swan::ids::chord, 1.0f);
+    h.setParam(dolphinflow::ids::chord, 1.0f);
     processBlock(h);
     REQUIRE(h.processor.getEngine().getShape() == 1);
 
-    h.setParam(swan::ids::latch, 1.0f);
+    h.setParam(dolphinflow::ids::latch, 1.0f);
     h.midi.addEvent(juce::MidiMessage::noteOff(1, 60), 0);
     processBlock(h);
     REQUIRE(h.processor.getEngine().isGateOn());
-    h.setParam(swan::ids::latch, 0.0f);
+    h.setParam(dolphinflow::ids::latch, 0.0f);
     processBlock(h);
     REQUIRE_FALSE(h.processor.getEngine().isGateOn());
 }
 
-TEST_CASE("swan: editor keys and buttons reach the audio thread")
+TEST_CASE("dolphinflow: editor keys and buttons reach the audio thread")
 {
     Harness h(kRate, 512);
-    h.processor.pressRoot(swan::SwanProcessor::kKeySourceBase + 7, 7);
+    h.processor.pressRoot(dolphinflow::DolphinFlowProcessor::kKeySourceBase + 7, 7);
     processBlock(h);
     REQUIRE(h.processor.getEngine().getRoot() == G);
     h.processor.releaseAllKeys();
@@ -447,37 +447,175 @@ TEST_CASE("swan: editor keys and buttons reach the audio thread")
     REQUIRE_FALSE(h.processor.getEngine().isGateOn());
 }
 
-TEST_CASE("swan: state round trip")
+namespace
 {
-    swan::SwanProcessor a;
-    const auto set = [](swan::SwanProcessor& p, const juce::ParameterID& id, float value)
+struct MidiEvent
+{
+    bool on;
+    int note;
+    int position;
+};
+
+std::vector<MidiEvent> processAndCollect(Harness& h, int samples = 512)
+{
+    juce::AudioBuffer<float> buffer(2, samples);
+    buffer.clear();
+    h.processor.processBlock(buffer, h.midi);
+    std::vector<MidiEvent> out;
+    for (const auto metadata : h.midi)
+    {
+        const auto message = metadata.getMessage();
+        if (message.isNoteOnOrOff())
+            out.push_back({message.isNoteOn(), message.getNoteNumber(), metadata.samplePosition});
+    }
+    h.midi.clear();
+    return out;
+}
+
+std::vector<int> notesWhere(const std::vector<MidiEvent>& events, bool on)
+{
+    std::vector<int> notes;
+    for (const auto& e : events)
+        if (e.on == on)
+            notes.push_back(e.note);
+    std::sort(notes.begin(), notes.end());
+    return notes;
+}
+
+std::vector<int> voicedNotes(const dolphinflow::DolphinFlowProcessor& p)
+{
+    const auto& v = p.getEngine().getVoicing();
+    std::vector<int> notes(v.notes, v.notes + v.count);
+    std::sort(notes.begin(), notes.end());
+    notes.erase(std::unique(notes.begin(), notes.end()), notes.end());
+    return notes;
+}
+} // namespace
+
+TEST_CASE("dolphinflow: chords are named from their notes")
+{
+    int root = 0, shape = 0;
+    const int am7[] = {57, 60, 64, 67};
+    REQUIRE(dolphinflow::dsp::identifyChord(am7, 4, root, shape));
+    REQUIRE(root == A);
+    REQUIRE(shape == 4);
+    const int c6inversion[] = {64, 67, 72}; // C major, E in the bass
+    REQUIRE(dolphinflow::dsp::identifyChord(c6inversion, 3, root, shape));
+    REQUIRE(root == C);
+    REQUIRE(shape == kMaj);
+    const int cluster[] = {60, 61, 62};
+    REQUIRE_FALSE(dolphinflow::dsp::identifyChord(cluster, 3, root, shape));
+    REQUIRE(shape == -1);
+}
+
+TEST_CASE("dolphinflow: the played notes come out as MIDI, common tones held across changes")
+{
+    Harness h(kRate, 512);
+    h.processor.pressRoot(dolphinflow::DolphinFlowProcessor::kKeySourceBase + C, C);
+    const auto first = processAndCollect(h);
+    REQUIRE(notesWhere(first, false).empty());
+    REQUIRE(notesWhere(first, true) == voicedNotes(h.processor));
+    REQUIRE(notesWhere(first, true).size() >= 3);
+
+    const auto before = voicedNotes(h.processor);
+    h.processor.pressRoot(dolphinflow::DolphinFlowProcessor::kKeySourceBase + A, A);
+    const auto change = processAndCollect(h);
+    const auto after = voicedNotes(h.processor);
+    for (int note : notesWhere(change, false))
+        REQUIRE(std::find(after.begin(), after.end(), note) == after.end()); // only notes that left
+    for (int note : notesWhere(change, true))
+        REQUIRE(std::find(before.begin(), before.end(), note) == before.end()); // only notes that arrived
+    REQUIRE_FALSE(notesWhere(change, true).empty());
+    REQUIRE(notesWhere(change, true).size() < after.size()); // C to Am shares tones
+
+    h.processor.releaseAllKeys();
+    const auto release = processAndCollect(h);
+    REQUIRE(notesWhere(release, false) == after);
+    REQUIRE(notesWhere(release, true).empty());
+}
+
+TEST_CASE("dolphinflow: MIDI out lands on the input's sample")
+{
+    Harness h(kRate, 512);
+    h.midi.addEvent(juce::MidiMessage::noteOn(1, 62, 0.8f), 200);
+    const auto out = processAndCollect(h);
+    REQUIRE_FALSE(out.empty());
+    for (const auto& e : out)
+        REQUIRE(e.position == 200);
+}
+
+TEST_CASE("dolphinflow: a clip recorded from MIDI out plays back the same voicing")
+{
+    Harness recorder(kRate, 512);
+    recorder.setParam(dolphinflow::ids::chord, 4.0f); // min7
+    recorder.processor.pressRoot(dolphinflow::DolphinFlowProcessor::kKeySourceBase + D, D);
+    const auto recorded = processAndCollect(recorder);
+    const auto voiced = voicedNotes(recorder.processor);
+
+    Harness player(kRate, 512); // CHORD left at MAJ: the clip, not the parameter, decides
+    for (int note : notesWhere(recorded, true))
+        player.midi.addEvent(juce::MidiMessage::noteOn(1, note, 0.8f), 64);
+    const auto echoed = processAndCollect(player);
+    REQUIRE(voicedNotes(player.processor) == voiced);
+    REQUIRE(player.processor.getEngine().getRoot() == D);
+    REQUIRE(player.processor.getEngine().getShape() == 4);
+    REQUIRE(notesWhere(echoed, true) == voiced);
+
+    // The next chord in the clip: offs and ons on one sample glide as one change.
+    const auto& engine = player.processor.getEngine();
+    std::vector<int> next = voiced;
+    next.back() += 2;
+    for (int note : voiced)
+        player.midi.addEvent(juce::MidiMessage::noteOff(1, note), 0);
+    for (int note : next)
+        player.midi.addEvent(juce::MidiMessage::noteOn(1, note, 0.8f), 0);
+    processAndCollect(player, 64);
+    REQUIRE(voicedNotes(player.processor) == next);
+    REQUIRE(engine.isHeld());
+}
+
+TEST_CASE("dolphinflow: two overlapping MIDI roots stay roots")
+{
+    Harness h(kRate, 512);
+    h.midi.addEvent(juce::MidiMessage::noteOn(1, 48, 0.8f), 0);
+    h.midi.addEvent(juce::MidiMessage::noteOn(1, 53, 0.8f), 10);
+    processAndCollect(h);
+    REQUIRE(h.processor.getEngine().getRoot() == F);
+    REQUIRE(h.processor.getEngine().getVoicing().count == 4);
+}
+
+TEST_CASE("dolphinflow: state round trip")
+{
+    dolphinflow::DolphinFlowProcessor a;
+    const auto set = [](dolphinflow::DolphinFlowProcessor& p, const juce::ParameterID& id, float value)
     {
         auto* param = p.apvts.getParameter(id.getParamID());
         param->setValueNotifyingHost(param->convertTo0to1(value));
     };
-    set(a, swan::ids::chord, 6.0f);
-    set(a, swan::ids::mode, 2.0f);
-    set(a, swan::ids::glide, 900.0f);
-    set(a, swan::ids::octave, -1.0f);
+    set(a, dolphinflow::ids::chord, 6.0f);
+    set(a, dolphinflow::ids::mode, 2.0f);
+    set(a, dolphinflow::ids::glide, 900.0f);
+    set(a, dolphinflow::ids::octave, -1.0f);
     juce::MemoryBlock state;
     a.getStateInformation(state);
 
-    swan::SwanProcessor b;
+    dolphinflow::DolphinFlowProcessor b;
     b.setStateInformation(state.getData(), static_cast<int>(state.getSize()));
-    REQUIRE(paramValue(b, swan::ids::chord) == 6.0f);
-    REQUIRE(paramValue(b, swan::ids::mode) == 2.0f);
-    REQUIRE(paramValue(b, swan::ids::glide) == Catch::Approx(900.0f).margin(0.5));
-    REQUIRE(paramValue(b, swan::ids::octave) == -1.0f);
+    REQUIRE(paramValue(b, dolphinflow::ids::chord) == 6.0f);
+    REQUIRE(paramValue(b, dolphinflow::ids::mode) == 2.0f);
+    REQUIRE(paramValue(b, dolphinflow::ids::glide) == Catch::Approx(900.0f).margin(0.5));
+    REQUIRE(paramValue(b, dolphinflow::ids::octave) == -1.0f);
 }
 
 // ---- editor ------------------------------------------------------------------------------------------------
 
-TEST_CASE("swan: editor renders headlessly")
+TEST_CASE("dolphinflow: editor renders headlessly")
 {
     juce::ScopedJuceInitialiser_GUI gui;
     Harness h(kRate, 512);
-    h.setParam(swan::ids::chord, 4.0f);
-    std::unique_ptr<swan::SwanEditor> editor(static_cast<swan::SwanEditor*>(h.processor.createEditor()));
+    h.setParam(dolphinflow::ids::chord, 4.0f);
+    std::unique_ptr<dolphinflow::DolphinFlowEditor> editor(
+        static_cast<dolphinflow::DolphinFlowEditor*>(h.processor.createEditor()));
 
     // A short progression (Am7, Fmaj7, C, G) so the ribbons show voices gliding between chords.
     const struct
@@ -486,7 +624,7 @@ TEST_CASE("swan: editor renders headlessly")
     } progression[] = {{57, 4}, {53, 3}, {60, 0}, {55, 0}};
     for (const auto& chord : progression)
     {
-        h.setParam(swan::ids::chord, static_cast<float>(chord.shape));
+        h.setParam(dolphinflow::ids::chord, static_cast<float>(chord.shape));
         h.midi.addEvent(juce::MidiMessage::noteOn(1, chord.note, 0.8f), 0);
         for (int frame = 0; frame < 36; ++frame)
         {
@@ -498,24 +636,25 @@ TEST_CASE("swan: editor renders headlessly")
     h.midi.clear();
 
     const auto image = editor->createComponentSnapshot(editor->getLocalBounds(), true, 2.0f);
-    REQUIRE(image.getWidth() == swan::SwanEditor::kWidth * 2);
-    REQUIRE(image.getHeight() == swan::SwanEditor::kHeight * 2);
+    REQUIRE(image.getWidth() == dolphinflow::DolphinFlowEditor::kWidth * 2);
+    REQUIRE(image.getHeight() == dolphinflow::DolphinFlowEditor::kHeight * 2);
     int bright = 0;
     for (int y = 0; y < image.getHeight(); y += 2)
         for (int x = 0; x < image.getWidth(); x += 2)
             bright += image.getPixelAt(x, y).getBrightness() > 0.55f ? 1 : 0;
     REQUIRE(bright > 400);
-    writePngIfRequested(image, "swan-ui.png");
+    writePngIfRequested(image, "dolphinflow-ui.png");
 }
 
-TEST_CASE("swan: computer keys play roots and pick chords")
+TEST_CASE("dolphinflow: computer keys play roots and pick chords")
 {
     juce::ScopedJuceInitialiser_GUI gui;
     Harness h(kRate, 512);
-    std::unique_ptr<swan::SwanEditor> editor(static_cast<swan::SwanEditor*>(h.processor.createEditor()));
+    std::unique_ptr<dolphinflow::DolphinFlowEditor> editor(
+        static_cast<dolphinflow::DolphinFlowEditor*>(h.processor.createEditor()));
 
     REQUIRE(editor->keyPressed(juce::KeyPress('5', {}, '5')));
-    REQUIRE(paramValue(h.processor, swan::ids::chord) == 4.0f);
+    REQUIRE(paramValue(h.processor, dolphinflow::ids::chord) == 4.0f);
     REQUIRE(editor->keyPressed(juce::KeyPress('h', {}, 'h')));
     REQUIRE(editor->keyPressed(juce::KeyPress('h', {}, 'h'))); // auto-repeat is ignored
     processBlock(h);
@@ -527,38 +666,39 @@ TEST_CASE("swan: computer keys play roots and pick chords")
     REQUIRE_FALSE(h.processor.getEngine().isGateOn());
 
     REQUIRE(editor->keyPressed(juce::KeyPress('x', {}, 'x')));
-    REQUIRE(paramValue(h.processor, swan::ids::octave) == 1.0f);
+    REQUIRE(paramValue(h.processor, dolphinflow::ids::octave) == 1.0f);
     REQUIRE(editor->keyPressed(juce::KeyPress('l', {}, 'l')));
-    REQUIRE(paramValue(h.processor, swan::ids::latch) == 1.0f);
+    REQUIRE(paramValue(h.processor, dolphinflow::ids::latch) == 1.0f);
     REQUIRE_FALSE(editor->keyPressed(juce::KeyPress('a', juce::ModifierKeys::commandModifier, 'a')));
     REQUIRE_FALSE(editor->keyPressed(juce::KeyPress('q', {}, 'q')));
 }
 
-TEST_CASE("swan: editor controls drive their parameters")
+TEST_CASE("dolphinflow: editor controls drive their parameters")
 {
     juce::ScopedJuceInitialiser_GUI gui;
-    swan::SwanProcessor processor;
-    std::unique_ptr<swan::SwanEditor> editor(static_cast<swan::SwanEditor*>(processor.createEditor()));
+    dolphinflow::DolphinFlowProcessor processor;
+    std::unique_ptr<dolphinflow::DolphinFlowEditor> editor(
+        static_cast<dolphinflow::DolphinFlowEditor*>(processor.createEditor()));
 
     animalaudio::testing::click(editor->getChordPills().getPill(8));
-    REQUIRE(paramValue(processor, swan::ids::chord) == 8.0f);
+    REQUIRE(paramValue(processor, dolphinflow::ids::chord) == 8.0f);
     animalaudio::testing::click(editor->getModePills().getPill(1));
-    REQUIRE(paramValue(processor, swan::ids::mode) == 1.0f);
+    REQUIRE(paramValue(processor, dolphinflow::ids::mode) == 1.0f);
     animalaudio::testing::click(editor->getVoicePills().getPill(3));
-    REQUIRE(paramValue(processor, swan::ids::voices) == 3.0f);
+    REQUIRE(paramValue(processor, dolphinflow::ids::voices) == 3.0f);
     animalaudio::testing::click(editor->getOctaveDownButton());
-    REQUIRE(paramValue(processor, swan::ids::octave) == -1.0f);
+    REQUIRE(paramValue(processor, dolphinflow::ids::octave) == -1.0f);
     animalaudio::testing::click(editor->getLatchButton());
-    REQUIRE(paramValue(processor, swan::ids::latch) == 1.0f);
+    REQUIRE(paramValue(processor, dolphinflow::ids::latch) == 1.0f);
 
-    editor->getKnob(swan::ids::glide).setValue(1200.0, juce::sendNotificationSync);
-    REQUIRE(paramValue(processor, swan::ids::glide) == Catch::Approx(1200.0f).margin(1.0));
-    auto* tone = processor.apvts.getParameter(swan::ids::tone.getParamID());
+    editor->getKnob(dolphinflow::ids::glide).setValue(1200.0, juce::sendNotificationSync);
+    REQUIRE(paramValue(processor, dolphinflow::ids::glide) == Catch::Approx(1200.0f).margin(1.0));
+    auto* tone = processor.apvts.getParameter(dolphinflow::ids::tone.getParamID());
     tone->setValueNotifyingHost(0.2f);
-    REQUIRE(editor->getKnob(swan::ids::tone).getValue() == Catch::Approx(0.2).margin(0.002));
+    REQUIRE(editor->getKnob(dolphinflow::ids::tone).getValue() == Catch::Approx(0.2).margin(0.002));
 }
 
-TEST_CASE("swan: build stamp is baked in")
+TEST_CASE("dolphinflow: build stamp is baked in")
 {
     REQUIRE(animalaudio::core::buildStampShort().isNotEmpty());
 }

@@ -1,12 +1,12 @@
-#include "SwanProcessor.h"
+#include "DolphinFlowProcessor.h"
 
-#include "SwanEditor.h"
+#include "DolphinFlowEditor.h"
 
 #include <animalaudio/core/ParameterFactory.h>
 
 #include <algorithm>
 
-namespace swan
+namespace dolphinflow
 {
 namespace
 {
@@ -39,9 +39,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
 }
 } // namespace
 
-SwanProcessor::SwanProcessor()
+DolphinFlowProcessor::DolphinFlowProcessor()
     : juce::AudioProcessor(BusesProperties().withOutput("Output", juce::AudioChannelSet::stereo(), true))
-    , apvts(*this, nullptr, "SwanState", createParameterLayout())
+    , apvts(*this, nullptr, "DolphinFlowState", createParameterLayout())
 {
     chordParam = apvts.getRawParameterValue(ids::chord.getParamID());
     modeParam = apvts.getRawParameterValue(ids::mode.getParamID());
@@ -57,21 +57,22 @@ SwanProcessor::SwanProcessor()
 
     pushSettings();
     engine.prepare(44100.0);
+    midiOut.ensureSize(4096);
 }
 
-bool SwanProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
+bool DolphinFlowProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
 {
     const auto& output = layouts.getMainOutputChannelSet();
     return layouts.getMainInputChannelSet().isDisabled() &&
            (output == juce::AudioChannelSet::mono() || output == juce::AudioChannelSet::stereo());
 }
 
-int SwanProcessor::currentShape() const noexcept
+int DolphinFlowProcessor::currentShape() const noexcept
 {
     return std::clamp(juce::roundToInt(chordParam->load()), 0, dsp::kNumChordShapes - 1);
 }
 
-void SwanProcessor::pushSettings() noexcept
+void DolphinFlowProcessor::pushSettings() noexcept
 {
     dsp::EngineSettings s;
     s.mode = static_cast<dsp::Mode>(std::clamp(juce::roundToInt(modeParam->load()), 0, dsp::kNumModes - 1));
@@ -87,16 +88,19 @@ void SwanProcessor::pushSettings() noexcept
     engine.setSettings(s);
 }
 
-void SwanProcessor::prepareToPlay(double sampleRate, int)
+void DolphinFlowProcessor::prepareToPlay(double sampleRate, int)
 {
     heldCount = 0;
+    intent = {};
+    outCount = 0;
+    midiOut.ensureSize(4096);
     lastShape = currentShape();
     lastLatch = latchParam->load() > 0.5f;
     pushSettings();
     engine.prepare(sampleRate);
 }
 
-void SwanProcessor::press(int source, int root) noexcept
+void DolphinFlowProcessor::press(int source, int root, int note, int velocity) noexcept
 {
     release(source);
     if (heldCount == static_cast<int>(held.size()))
@@ -104,60 +108,132 @@ void SwanProcessor::press(int source, int root) noexcept
         std::move(held.begin() + 1, held.end(), held.begin());
         --heldCount;
     }
-    held[static_cast<std::size_t>(heldCount++)] = {source, root};
-    engine.playChord(root, currentShape());
+    held[static_cast<std::size_t>(heldCount++)] = {source, root, note};
+    lastVelocity = std::clamp(velocity, 1, 127);
 }
 
-void SwanProcessor::release(int source) noexcept
+void DolphinFlowProcessor::release(int source) noexcept
 {
     const auto end = held.begin() + heldCount;
     const auto it = std::find_if(held.begin(), end, [source](const Held& h) { return h.source == source; });
     if (it == end)
         return;
-    const bool wasNewest = it == end - 1;
     std::move(it + 1, end, it);
     --heldCount;
-    if (wasNewest)
-        afterRelease();
 }
 
-void SwanProcessor::releaseKeys() noexcept
+void DolphinFlowProcessor::releaseKeys() noexcept
 {
     const auto end = held.begin() + heldCount;
-    const bool newestWasKey = heldCount > 0 && held[static_cast<std::size_t>(heldCount - 1)].source >= kKeySourceBase;
     heldCount = static_cast<int>(
         std::remove_if(held.begin(), end, [](const Held& h) { return h.source >= kKeySourceBase; }) - held.begin());
-    if (newestWasKey)
-        afterRelease();
 }
 
-void SwanProcessor::afterRelease() noexcept
+DolphinFlowProcessor::Intent DolphinFlowProcessor::wantedIntent() const noexcept
 {
-    if (heldCount > 0)
-        engine.playChord(held[static_cast<std::size_t>(heldCount - 1)].root, currentShape());
-    else if (latchParam->load() < 0.5f)
-        engine.release();
+    Intent next;
+    if (heldCount == 0)
+        return next;
+    const auto& newest = held[static_cast<std::size_t>(heldCount - 1)];
+    next.root = newest.root;
+    next.shape = currentShape();
+    next.kind = Intent::Kind::Chord;
+    if (newest.note < 0)
+        return next;
+
+    // Three or more MIDI notes at once are a voiced chord (e.g. a clip recorded from our MIDI out): play it as is.
+    // Two stay roots, so overlapping legato roots on a keyboard do not turn into dyads.
+    int notes[kMaxHeld] = {};
+    int count = 0;
+    for (int i = 0; i < heldCount; ++i)
+        if (held[static_cast<std::size_t>(i)].note >= 0)
+            notes[count++] = held[static_cast<std::size_t>(i)].note;
+    std::sort(notes, notes + count);
+    count = static_cast<int>(std::unique(notes, notes + count) - notes);
+    if (count < kMinVoicedNotes)
+        return next;
+    next.kind = Intent::Kind::Voicing;
+    next.voicing.count = std::min(count, dsp::kMaxVoices);
+    std::copy(notes, notes + next.voicing.count, next.voicing.notes);
+    return next;
 }
 
-void SwanProcessor::handleMidiMessage(const juce::MidiMessage& message) noexcept
+void DolphinFlowProcessor::resolve() noexcept
+{
+    const Intent next = wantedIntent();
+    if (next == intent)
+        return;
+    intent = next;
+    switch (intent.kind)
+    {
+    case Intent::Kind::None:
+        if (latchParam->load() < 0.5f)
+            engine.release();
+        break;
+    case Intent::Kind::Chord:
+        engine.playChord(intent.root, intent.shape);
+        break;
+    case Intent::Kind::Voicing:
+        engine.playVoicing(intent.voicing);
+        break;
+    }
+}
+
+void DolphinFlowProcessor::syncMidiOut(int samplePosition) noexcept
+{
+    int wanted[dsp::kMaxVoices] = {};
+    int wantedCount = 0;
+    if (engine.isHeld())
+    {
+        const auto& voicing = engine.getVoicing();
+        for (int v = 0; v < voicing.count; ++v)
+            if (std::find(wanted, wanted + wantedCount, voicing.notes[v]) == wanted + wantedCount)
+                wanted[wantedCount++] = voicing.notes[v];
+    }
+
+    // Common tones keep sounding across a chord change, so a recorded clip shows them as one long note.
+    int kept = 0;
+    for (int i = 0; i < outCount; ++i)
+    {
+        const int note = outNotes[static_cast<std::size_t>(i)];
+        if (std::find(wanted, wanted + wantedCount, note) == wanted + wantedCount)
+            midiOut.addEvent(juce::MidiMessage::noteOff(kMidiChannel, note), samplePosition);
+        else
+            outNotes[static_cast<std::size_t>(kept++)] = note;
+    }
+    outCount = kept;
+    for (int i = 0; i < wantedCount; ++i)
+    {
+        const auto begin = outNotes.begin();
+        if (std::find(begin, begin + outCount, wanted[i]) != begin + outCount)
+            continue;
+        midiOut.addEvent(juce::MidiMessage::noteOn(kMidiChannel, wanted[i], static_cast<juce::uint8>(lastVelocity)),
+                         samplePosition);
+        outNotes[static_cast<std::size_t>(outCount++)] = wanted[i];
+    }
+}
+
+void DolphinFlowProcessor::handleMidiMessage(const juce::MidiMessage& message) noexcept
 {
     if (message.isNoteOn())
-        press(message.getNoteNumber(), message.getNoteNumber() % 12);
+        press(message.getNoteNumber(), message.getNoteNumber() % 12, message.getNoteNumber(), message.getVelocity());
     else if (message.isNoteOff())
         release(message.getNoteNumber());
     else if (message.isAllSoundOff())
     {
         heldCount = 0;
+        intent = {};
         engine.kill();
     }
     else if (message.isAllNotesOff())
     {
         heldCount = 0;
+        intent = {};
         engine.release();
     }
 }
 
-void SwanProcessor::drainUiEvents() noexcept
+void DolphinFlowProcessor::drainUiEvents() noexcept
 {
     const auto scope = uiFifo.read(uiFifo.getNumReady());
     const auto handle = [this](int start, int size)
@@ -168,7 +244,7 @@ void SwanProcessor::drainUiEvents() noexcept
             switch (event.type)
             {
             case UiEvent::Type::Press:
-                press(event.source, event.root);
+                press(event.source, event.root, -1, kKeyVelocity);
                 break;
             case UiEvent::Type::Release:
                 release(event.source);
@@ -183,33 +259,39 @@ void SwanProcessor::drainUiEvents() noexcept
     handle(scope.startIndex2, scope.blockSize2);
 }
 
-void SwanProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
+void DolphinFlowProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
     juce::ScopedNoDenormals noDenormals;
+    midiOut.clear();
     const int numSamples = buffer.getNumSamples();
-    const int channels = std::min(buffer.getNumChannels(), dsp::SwanEngine::kMaxChannels);
-    if (channels == 0)
-        return;
+    const int channels = std::min(buffer.getNumChannels(), dsp::DolphinFlowEngine::kMaxChannels);
     for (int channel = channels; channel < buffer.getNumChannels(); ++channel)
         buffer.clear(channel, 0, numSamples);
+    if (channels == 0)
+    {
+        midi.clear();
+        return;
+    }
 
     pushSettings();
     drainUiEvents();
+    resolve();
 
-    // A new chord quality re-voices what is sounding; switching LATCH off lets a latched chord go.
+    // A new chord quality re-voices a latched chord too; switching LATCH off lets a latched chord go.
     const int shape = currentShape();
     if (shape != lastShape)
     {
         lastShape = shape;
-        if (engine.isGateOn() && engine.getRoot() >= 0)
+        if (intent.kind == Intent::Kind::None && engine.isHeld() && engine.getRoot() >= 0)
             engine.playChord(engine.getRoot(), shape);
     }
     const bool latch = latchParam->load() > 0.5f;
     if (lastLatch && !latch && heldCount == 0)
         engine.release();
     lastLatch = latch;
+    syncMidiOut(0);
 
-    float* pointers[dsp::SwanEngine::kMaxChannels] = {};
+    float* pointers[dsp::DolphinFlowEngine::kMaxChannels] = {};
     int done = 0;
     const auto renderTo = [&](int end)
     {
@@ -221,15 +303,22 @@ void SwanProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuf
         done = end;
     };
 
-    for (const auto metadata : midi)
+    // Messages sharing a timestamp are applied together, so a chord from a clip lands as one chord.
+    for (auto it = midi.cbegin(); it != midi.cend();)
     {
-        renderTo(std::clamp(metadata.samplePosition, 0, numSamples));
-        handleMidiMessage(metadata.getMessage());
+        const int position = (*it).samplePosition;
+        const int at = std::clamp(position, 0, numSamples);
+        renderTo(at);
+        for (; it != midi.cend() && (*it).samplePosition == position; ++it)
+            handleMidiMessage((*it).getMessage());
+        resolve();
+        syncMidiOut(std::min(at, std::max(0, numSamples - 1)));
     }
     renderTo(numSamples);
+    midi.swapWith(midiOut);
 }
 
-void SwanProcessor::postUiEvent(const UiEvent& event)
+void DolphinFlowProcessor::postUiEvent(const UiEvent& event)
 {
     const auto scope = uiFifo.write(1);
     if (scope.blockSize1 > 0)
@@ -238,22 +327,22 @@ void SwanProcessor::postUiEvent(const UiEvent& event)
         uiEvents[static_cast<std::size_t>(scope.startIndex2)] = event;
 }
 
-void SwanProcessor::pressRoot(int source, int rootPitchClass)
+void DolphinFlowProcessor::pressRoot(int source, int rootPitchClass)
 {
     postUiEvent({UiEvent::Type::Press, source, dsp::pitchClassOf(rootPitchClass)});
 }
 
-void SwanProcessor::releaseRoot(int source)
+void DolphinFlowProcessor::releaseRoot(int source)
 {
     postUiEvent({UiEvent::Type::Release, source, 0});
 }
 
-void SwanProcessor::releaseAllKeys()
+void DolphinFlowProcessor::releaseAllKeys()
 {
     postUiEvent({UiEvent::Type::ReleaseAllKeys, 0, 0});
 }
 
-void SwanProcessor::setParameterFromUi(const juce::ParameterID& id, float realValue)
+void DolphinFlowProcessor::setParameterFromUi(const juce::ParameterID& id, float realValue)
 {
     if (auto* param = apvts.getParameter(id.getParamID()))
     {
@@ -263,31 +352,31 @@ void SwanProcessor::setParameterFromUi(const juce::ParameterID& id, float realVa
     }
 }
 
-float SwanProcessor::getParameterValue(const juce::ParameterID& id) const
+float DolphinFlowProcessor::getParameterValue(const juce::ParameterID& id) const
 {
     return apvts.getRawParameterValue(id.getParamID())->load();
 }
 
-void SwanProcessor::getStateInformation(juce::MemoryBlock& destData)
+void DolphinFlowProcessor::getStateInformation(juce::MemoryBlock& destData)
 {
     if (const auto xml = apvts.copyState().createXml())
         copyXmlToBinary(*xml, destData);
 }
 
-void SwanProcessor::setStateInformation(const void* data, int sizeInBytes)
+void DolphinFlowProcessor::setStateInformation(const void* data, int sizeInBytes)
 {
     if (const auto xml = getXmlFromBinary(data, sizeInBytes))
         if (xml->hasTagName(apvts.state.getType()))
             apvts.replaceState(juce::ValueTree::fromXml(*xml));
 }
 
-juce::AudioProcessorEditor* SwanProcessor::createEditor()
+juce::AudioProcessorEditor* DolphinFlowProcessor::createEditor()
 {
-    return new SwanEditor(*this);
+    return new DolphinFlowEditor(*this);
 }
-} // namespace swan
+} // namespace dolphinflow
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
-    return new swan::SwanProcessor();
+    return new dolphinflow::DolphinFlowProcessor();
 }

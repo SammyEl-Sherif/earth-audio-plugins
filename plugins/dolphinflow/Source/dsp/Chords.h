@@ -2,7 +2,7 @@
 
 #include <algorithm>
 
-namespace swan::dsp
+namespace dolphinflow::dsp
 {
 inline constexpr int kMaxChordTones = 5;
 
@@ -41,4 +41,42 @@ inline int pitchClassOf(int midiNote) noexcept
 {
     return ((midiNote % 12) + 12) % 12;
 }
-} // namespace swan::dsp
+/**
+ * Names a set of notes: the chord shape whose pitch classes match exactly, preferring the lowest note as the root.
+ * Returns false (root = lowest note's pitch class) when no shape matches.
+ */
+inline bool identifyChord(const int* notes, int count, int& root, int& shape) noexcept
+{
+    root = 0;
+    shape = -1;
+    if (count <= 0)
+        return false;
+    unsigned played = 0;
+    int lowest = notes[0];
+    for (int i = 0; i < count; ++i)
+    {
+        played |= 1u << pitchClassOf(notes[i]);
+        lowest = std::min(lowest, notes[i]);
+    }
+    root = pitchClassOf(lowest);
+    for (int attempt = 0; attempt < 12; ++attempt)
+    {
+        const int candidate = (root + attempt) % 12;
+        if ((played & (1u << candidate)) == 0)
+            continue;
+        for (int s = 0; s < kNumChordShapes; ++s)
+        {
+            unsigned tones = 0;
+            for (int i = 0; i < kChordShapes[s].count; ++i)
+                tones |= 1u << pitchClassOf(candidate + kChordShapes[s].intervals[i]);
+            if (tones == played)
+            {
+                root = candidate;
+                shape = s;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+} // namespace dolphinflow::dsp
