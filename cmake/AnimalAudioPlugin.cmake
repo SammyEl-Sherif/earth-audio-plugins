@@ -2,7 +2,7 @@
 #     PRODUCT_NAME  "Duck"
 #     PLUGIN_CODE   Duck          # unique 4 chars, at least one uppercase
 #     [DESCRIPTION  "..."]
-#     [IS_SYNTH FALSE]
+#     [IS_SYNTH FALSE]          # TRUE: an instrument (VST3 category Instrument|Synth, no audio input needed)
 #     [NEEDS_MIDI_INPUT FALSE]  # TRUE gives the effect a MIDI input (e.g. notes that steer it)
 #     [BUNDLE_ID    com.animalaudio.duck]
 #     SOURCES       a.cpp b.cpp ...)
@@ -31,6 +31,13 @@ function(aa_add_plugin target)
         set(AA_BUNDLE_ID "com.animalaudio.${_lower}")
     endif()
 
+    # Instruments must say so, or Live files them under Audio Effects and gives them no MIDI track slot.
+    if(AA_IS_SYNTH)
+        set(_vst3_categories Instrument Synth)
+    else()
+        set(_vst3_categories Fx)
+    endif()
+
     set(_formats VST3)
     if(AA_BUILD_STANDALONE)
         list(APPEND _formats Standalone)
@@ -49,7 +56,7 @@ function(aa_add_plugin target)
         PLUGIN_MANUFACTURER_CODE AnAu
         PLUGIN_CODE ${AA_PLUGIN_CODE}
         FORMATS ${_formats}
-        VST3_CATEGORIES Fx
+        VST3_CATEGORIES ${_vst3_categories}
         IS_SYNTH ${AA_IS_SYNTH}
         NEEDS_MIDI_INPUT ${AA_NEEDS_MIDI_INPUT}
         NEEDS_MIDI_OUTPUT FALSE
