@@ -163,6 +163,31 @@ History lastoutr(0);
 
 // ---------- per-sample setup ----------
 
+// Every local variable is declared here, once, at top level. gen~'s compiler fails (gen2.dsp.Model:1455)
+// when a name is first created inside a loop or if-block and reused elsewhere, so nothing is declared in a block.
+TATT = 0; TREL = 0; TTIMES = 0; TSEQ = 0; TMOSAIC = 0; TGLIDE = 0; TARP = 0; TSTRUM = 0; THAZELO = 0; THAZEHI = 0;
+TTUNNEL = 0; TWARP = 0; TTAPS = 0; TTAPG = 0; HN = 0; NG = 0; NP = 0; SEMI = 0; sr = 0; md = 0; va = 0; act = 0; shp
+= 0; shs = 0; shi = 0; sht = 0; envatt = 0; envrel = 0; hosttempo = 0; bpm = 0; mult = 0; stepsamps = 0; beatphase =
+0; ppq = 0; target = 0; c1ms = 0; c3ms = 0; c10ms = 0; c15ms = 0; c25ms = 0; c30ms = 0; c80ms = 0; maxgrain = 0;
+ducksamps = 0; ispattern = 0; tapcount = 0; tapgainsum = 0; fbscale = 0; lcap = 0; lfade = 0; lgstep = 0; ldir = 0;
+crec = 0; cstop = 0; cclear = 0; doclose = 0; stopafter = 0; loopsm = 0; prefx = 0; linl = 0; linr = 0; lplayl = 0;
+lplayr = 0; running = 0; i = 0; fg = 0; srcl = 0; srcr = 0; dostrum = 0; xin = 0; wantfrozen = 0; switching = 0;
+nearwrap = 0; tdtarget = 0; stepi = 0; ticked = 0; s = 0; iscont = 0; docont = 0; tcount = 0; tlen = 0; tgain = 0;
+tflag = 0; tspeed = 0; tback = 0; r0 = 0; r1 = 0; r2 = 0; r3 = 0; r4 = 0; strumstagger = 0; strumlen = 0; k = 0; ok
+= 0; dl = 0; st = 0; sp = 0; ln = 0; gn = 0; pn = 0; wn = 0; gl = 0; ra = 0; rb = 0; ri = 0; rc = 0; span = 0; semis
+= 0; latest = 0; ai = 0; nk = 0; note = 0; rd = 0; re = 0; interval = 0; secs = 0; rf = 0; wdelay = 0; cents = 0; p
+= 0; cd = 0; mean = 0; travel = 0; lo = 0; hi = 0; newest = 0; oldest = 0; fits = 0; shift = 0; g = 0; attk = 0;
+rels = 0; lfo = 0; modmul = 0; wetl = 0; wetr = 0; newestr = 0; oldestr = 0; age = 0; glen = 0; win = 0; pos = 0;
+genv = 0; tri = 0; fl = 0; ft = 0; i1 = 0; i0 = 0; i2 = 0; i3 = 0; gsl = 0; gsr = 0; gsp = 0; tapunit = 0; tduck =
+0; tsmooth = 0; taplevel = 0; longest = 0; modsamps = 0; tstep = 0; tdl = 0; tpos = 0; tl = 0; tr = 0; tg = 0;
+direct = 0; effect = 0; cutlog = 0; res = 0; q = 0; fc = 0; fk = 0; fa1 = 0; fa2 = 0; fa3 = 0; restrim = 0; filtl =
+0; filtr = 0; feedback = 0; wi = 0; msc = 0; dl0 = 0; dv0 = 0; dx = 0; dl1 = 0; dv1 = 0; diffl = 0; dl2 = 0; dv2 =
+0; dl3 = 0; dv3 = 0; diffr = 0; rmd = 0; len0 = 0; len1 = 0; len2 = 0; len3 = 0; len4 = 0; len5 = 0; len6 = 0; len7
+= 0; t0 = 0; t1 = 0; t2 = 0; t3 = 0; t4 = 0; t5 = 0; t6 = 0; t7 = 0; rooml = 0; roomr = 0; h0 = 0; h1 = 0; h2 = 0;
+h3 = 0; h4 = 0; h5 = 0; h6 = 0; h7 = 0; j0 = 0; j2 = 0; j1 = 0; j3 = 0; j4 = 0; j6 = 0; j5 = 0; j7 = 0; hn = 0; m0 =
+0; m4 = 0; m1 = 0; m5 = 0; m2 = 0; m6 = 0; m3 = 0; m7 = 0; decay = 0; damp = 0; w0 = 0; w1 = 0; w2 = 0; w3 = 0; w4 =
+0; w5 = 0; w6 = 0; w7 = 0; spc = 0; effl = 0; effr = 0; wetmix = 0; outl = 0; outr = 0;
+
 // Constant tables (one Data, filled on the first sample): T<NAME> is each table's offset.
 TATT = 0;
 TREL = 4;
