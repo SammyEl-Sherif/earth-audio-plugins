@@ -192,6 +192,11 @@ melodic house pads, tech house stabs, ambient swells, emotional keys.
   `L` latch.
 - **Sound**: two detuned band-limited saws per voice into one shared envelope, filter (`dsp::Svf`) and reverb
   (`dsp::FdnReverb`).
+- **ARRANGE view**: eight chord squares that loop in order. Select a square, pick a chord (`1`-`0`) and play a root
+  to write it (the selection moves on); `-` / `+` on each square sets its length (1 beat to 4 bars), right-click or
+  Backspace empties it, arrows move the selection. **LOOP** plays it, locked to Live's beat while Live plays, else
+  free-running at the host tempo. **COPY MIDI CLIP**: drag it onto a MIDI track to drop one pass of the loop as a clip,
+  voiced exactly as it plays; a click saves the `.mid` to `~/Music/Animal Audio/Dolphin Flow` and copies its path.
 - **Recording**: the notes it plays come out as MIDI (the voiced chord, common tones held across changes). In Live, make
   a second MIDI track with *MIDI From* = the Dolphin Flow track / *Dolphin Flow*, arm it and record. Drop that clip back on
   the Dolphin Flow track and it plays the same voicings and glides (three or more notes held at once are played exactly
@@ -204,7 +209,11 @@ melodic house pads, tech house stabs, ambient swells, emotional keys.
   <img src="docs/images/dolphinflow-ui.png" alt="Dolphin Flow by Animal Audio" width="760">
 </p>
 
-> Screenshot from `AA_SCREENSHOT_DIR=docs/images ./build/plugins/dolphinflow/DolphinFlowTests "dolphinflow: editor renders headlessly"`.
+<p align="center">
+  <img src="docs/images/dolphinflow-arrange.png" alt="Dolphin Flow arrange view" width="760">
+</p>
+
+> Screenshots from `AA_SCREENSHOT_DIR=docs/images ./build/plugins/dolphinflow/DolphinFlowTests "*renders headlessly"`.
 
 ## Build
 

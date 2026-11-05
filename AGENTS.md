@@ -101,8 +101,9 @@ plugins/dolphinflow/  keyboard chord instrument (own processor and editor; the s
   Source/             DolphinFlowProcessor (params, held-root stack, MIDI + editor-key events via a lock-free FIFO,
                       MIDI out of the played notes), DolphinFlowEditor (computer keys, RootKey piano, glide ribbons)
   Source/dsp/         Chords (10 qualities, identifyChord), VoiceLeader (least-movement voicing), DolphinFlowEngine
-                      (paraphonic glide synth)
-  Source/ui/          DolphinFlowTheme (kThemeHue 218, ocean blue + aqua + coral), DolphinFlowMotif (leaping dolphin,
+                      (paraphonic glide synth), Progression (8 arrangement slots, loop maths, settled voicing, clip notes)
+  Source/ui/          ArrangeView (SlotCell squares, LOOP, ClipButton drag/save .mid),
+                      DolphinFlowTheme (kThemeHue 218, ocean blue + aqua + coral), DolphinFlowMotif (leaping dolphin,
                       dorsal-fin knob pointer,
                       lake ripples)
   tests/              DolphinFlowTests.cpp
@@ -373,10 +374,21 @@ out, no audio input). Roots come from computer keys (editor) or MIDI notes; the 
 - MIDI out (channel 1): after every change the voiced notes are diffed against the notes already out, so only notes
   that leave get note-offs and only new ones note-ons (common tones stay one long note). Release, latch-off and all
   notes off end them. Written into a preallocated buffer swapped into the host's `MidiBuffer`.
+- Arrangement (`dsp/Progression.h`): 8 `Slot`s {root (-1 empty), shape, length index into 1/2/3/4/6/8/12/16 beats},
+  saved as a `Progression` child of `apvts.state` (not parameters) and mirrored in one packed `std::atomic<int>` per
+  slot for the audio thread. Default: Am7 Fmaj7 C G, a bar each. With `loop` on, position in beats is the host PPQ
+  while the host plays, else free-running at the host (or 120) BPM from the moment LOOP turned on; empty slots are
+  skipped. The block is split at slot boundaries (sample-accurate). The first chord after starting uses
+  `settledVoicing` (led once round the loop), so pass one sounds like every later pass and like the exported clip.
+  While looping, keys and MIDI are tracked but the loop owns the engine; MIDI out carries the loop's notes.
+- MIDI clip (`writeMidiClip`): `buildClip` voices one settled pass, ties common tones, 960 ticks per beat, tempo and
+  4/4 meta, end-of-track at the loop length. `ClipButton`: drag = `performExternalDragDropOfFiles`, click = save to
+  `~/Music/Animal Audio/Dolphin Flow/Dolphin Flow - <chords>.mid` and copy the path.
 - Parameters (APVTS, version 1): `chord` (MAJ..MIN9), `mode` (Pad/Stab/Keys), `voices` (3-6, default 4), `octave`
-  (-2..+2), `glide` (0-2000 ms, default 350), `curve`, `tone`, `width`, `space`, `level` (0-100%), `latch` (bool).
+  (-2..+2), `glide` (0-2000 ms, default 350), `curve`, `tone`, `width`, `space`, `level` (0-100%), `latch`, `loop` (bool).
 - UI (`DolphinFlowEditor`, 960x600): header (dolphin, DOLPHIN FLOW / CHORD GLIDER, chord symbol and voiced notes,
-  badge); GLIDE display (5 s of voice-pitch ribbons over C-lines, swell); SOUND knobs (`ThemedKnob`, dorsal-fin cap); ROOT piano with
+  KEYS / ARRANGE view tabs (saved as `view` on the state tree), badge); ARRANGE swaps the GLIDE display for `ArrangeView`
+  (a played root writes into the selected square); GLIDE display (5 s of voice-pitch ribbons over C-lines, swell); SOUND knobs (`ThemedKnob`, dorsal-fin cap); ROOT piano with
   computer-key letters; MODE and VOICES pills; CHORD pills with their number keys, OCTAVE stepper, LATCH. Children never
   take keyboard focus, so keys always reach the editor; losing focus releases held keys.
 - Limits: paraphonic (one envelope and filter for the chord). Live keeps some keys (space, its own computer MIDI
