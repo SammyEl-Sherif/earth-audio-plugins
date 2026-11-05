@@ -49,7 +49,7 @@ and [AGENTS.md](AGENTS.md).
 | **Turtle Time** | Tempo-synced half-time, reverse, and beat repeat | `plugins/turtletime` | Private beta (0.1.0): VST3 builds, plugin tests pass, passes pluginval level 10 on macOS; loaded in Ableton Live on macOS |
 | **Parrot** | Pitch and formant voice bender with snap, robot and tube drive | `plugins/parrot` | Alpha (0.1.0): VST3 builds, plugin tests pass, passes pluginval level 10 on macOS; not yet tried in a DAW |
 | **Cosmos** | Granular looper: micro loops, granules, glitch and multidelay with hold, phrase looper and reverb | `plugins/cosmos` | Alpha (0.1.0): VST3 builds, plugin tests pass, passes pluginval level 10 on macOS; not yet tried in a DAW |
-| **Swan** | Keyboard chord instrument where every note glides into the next chord | `plugins/swan` | Alpha (0.1.0): VST3 instrument builds, plugin tests pass; not yet tried in a DAW |
+| **Swan** | Keyboard chord instrument where every note glides into the next chord | `plugins/swan` | Alpha (0.1.0): VST3 instrument builds, plugin tests pass, passes pluginval level 10 on macOS; not yet tried in a DAW |
 <!-- PLUGINS:END -->
 
 More animals are on the way. Adding one takes a single command (or the `/vst` agent skill), see [Adding a plugin](#adding-a-plugin).
