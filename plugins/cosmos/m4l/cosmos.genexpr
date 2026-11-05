@@ -1,0 +1,992 @@
+// COSMOS for Max for Live: a GenExpr port of plugins/cosmos/Source/dsp (CosmosEngine + PhraseLooper) and the
+// shared Svf / FdnReverb, for gen~ so it runs on Push 3 standalone. Keep in step with the C++ engine.
+//
+// in1/in2: audio L/R. in3: plugphasor~ (0..1 per beat, sample-locked to Live).
+// out1/out2: audio L/R. out3: looper state (0 empty, 1 rec, 2 play, 3 dub, 4 stopped). out4: loop position 0..1.
+//
+// Signal path, per sample:
+//   input (+ phrase loop if PRE-FX) -> history (frozen while HOLD) <- REPEATS feedback
+//   history -> grains / taps of the current mode -> EFFECT VOL -> resonant lowpass -> SPACE reverb
+//   dry/wet MIX (+ phrase loop if POST-FX)
+// Differences from the plugin: 24 grains (not 48) for Push's CPU, a 2^20-sample history, and the POST-FX looper
+// hears the output one sample late.
+
+// ---------- pure helpers ----------
+
+st2rate(semis) {
+	return exp2(semis / 12);
+}
+
+softclip(x) {
+	y = clamp(x, -3, 3);
+	return y * (27 + y * y) / (27 + (9 * y * y));
+}
+
+lerpf(lo, hi, t) {
+	return lo + (hi - lo) * t;
+}
+
+catmull(y0, y1, y2, y3, t) {
+	c3 = ((-0.5 * y0) + (1.5 * y1)) - ((1.5 * y2) - (0.5 * y3));
+	c2 = (y0 - (2.5 * y1)) + ((2 * y2) - (0.5 * y3));
+	c1 = 0.5 * (y2 - y0);
+	return ((c3 * t + c2) * t + c1) * t + y1;
+}
+
+// xorshift-free LCG on exact doubles: returns the next state and a value in [0, 1).
+rnd(state) {
+	nxt = (state * 1664525 + 1013904223) % 4294967296;
+	return nxt, nxt / 4294967296;
+}
+
+pick3(i, x0, x1, x2) {
+	return i < 0.5 ? x0 : (i < 1.5 ? x1 : x2);
+}
+
+pick4(i, x0, x1, x2, x3) {
+	return i < 0.5 ? x0 : (i < 1.5 ? x1 : (i < 2.5 ? x2 : x3));
+}
+
+pick6(i, x0, x1, x2, x3, x4, x5) {
+	return i < 3.5 ? pick4(i, x0, x1, x2, x3) : (i < 4.5 ? x4 : x5);
+}
+
+pick8(i, x0, x1, x2, x3, x4, x5, x6, x7) {
+	return i < 3.5 ? pick4(i, x0, x1, x2, x3) : pick4(i - 4, x4, x5, x6, x7);
+}
+
+// Grain start so a grain of `span` samples ends just behind the anchor (reverse grains start at it).
+sourcestart(anchorpos, span, speed) {
+	return speed >= 0 ? anchorpos - span - 2 : anchorpos - 2;
+}
+
+// One-pole smoother; snaps to the first target it sees. Each call site keeps its own state.
+smooth(target, coeff) {
+	History cur(0);
+	History primed(0);
+	if (primed < 0.5) {
+		cur = target;
+		primed = 1;
+	}
+	cur = target + coeff * (cur - target);
+	if (abs(cur - target) < 0.00002) {
+		cur = target;
+	}
+	return cur;
+}
+
+// Trapezoidal SVF lowpass (Simper form). Each call site keeps its own state.
+svflp(x, a1, a2, a3) {
+	History ic1(0);
+	History ic2(0);
+	v3 = x - ic2;
+	v1 = (a1 * ic1) + (a2 * v3);
+	v2 = ic2 + ((a2 * ic1) + (a3 * v3));
+	ic1 = 2 * v1 - ic1;
+	ic2 = 2 * v2 - ic2;
+	return v2;
+}
+
+// ---------- parameters (sent as "name value" messages; percent knobs arrive as 0..100) ----------
+
+Param mode(0, min=0, max=10);
+Param variation(0, min=0, max=3);
+Param activity(50, min=0, max=100);
+Param shape(60, min=0, max=100);
+Param modfreq(1, min=0.05, max=12);
+Param cutoff(20000, min=60, max=20000);
+Param resonance(15, min=0, max=100);
+Param drywet(50, min=0, max=100);
+Param effectdb(0, min=-24, max=12);
+Param timesel(2, min=0, max=5);
+Param sync(1, min=0, max=1);
+Param tempo(120, min=40, max=240);
+Param repeats(30, min=0, max=100);
+Param moddepth(0, min=0, max=100);
+Param space(30, min=0, max=100);
+Param revtime(3, min=0.4, max=20);
+Param looplevel(80, min=0, max=100);
+Param hold(0, min=0, max=1);
+Param loopreverse(0, min=0, max=1);
+Param looppre(1, min=0, max=1);
+Param cmdrec(0);
+Param cmdstop(0);
+Param cmdclear(0);
+Param hostplaying(0, min=0, max=1);
+Param hostspb(0);
+Param hostbeats(0);
+
+// ---------- state ----------
+
+Data hist(1048576, 2);
+Data lbuf(2880000, 2);
+Data gr(24, 11);
+Data pend(32, 8);
+
+Delay ap0(1024);
+Delay ap1(1024);
+Delay ap2(1024);
+Delay ap3(1024);
+Delay rv0(8192);
+Delay rv1(8192);
+Delay rv2(8192);
+Delay rv3(8192);
+Delay rv4(8192);
+Delay rv5(8192);
+Delay rv6(8192);
+Delay rv7(8192);
+
+History writehead(0);
+History filled(0);
+History frozen(0);
+History anchor(0);
+History holdstart(0);
+History holdlen(0);
+History holdoff(0);
+History steppos(0);
+History laststep(-1);
+History contcd(0);
+History seed(12345);
+History seqidx(0);
+History arpidx(0);
+History strumup(1);
+History warpflip(0);
+History bursttil(-1);
+History lastonset(-1000000000);
+History envfast(0);
+History envslow(0);
+History lfophase(0);
+History sampcount(0);
+History npend(0);
+History tdprev(1);
+History tsprev(0);
+History dcinl(0);
+History dcinr(0);
+History dcoutl(0);
+History dcoutr(0);
+History rvlfo(0);
+History low0(0);
+History low1(0);
+History low2(0);
+History low3(0);
+History low4(0);
+History low5(0);
+History low6(0);
+History low7(0);
+History lstate(0);
+History llen(0);
+History lhead(0);
+History lgain(0);
+History lclearpend(0);
+History lastoutl(0);
+History lastoutr(0);
+
+// ---------- per-sample setup ----------
+
+HN = 1048576;
+NG = 24;
+NP = 32;
+SEMI = 0.0595;
+sr = samplerate;
+
+md = clamp(floor(mode + 0.5), 0, 10);
+va = clamp(floor(variation + 0.5), 0, 3);
+act = clamp(activity * 0.01, 0, 1);
+shp = clamp(shape * 0.01, 0, 1);
+
+// Grain envelope: square -> swell -> triangle -> decay, as fractions of the grain length.
+shs = shp * 3;
+shi = min(2, floor(shs));
+sht = shs - shi;
+envatt = lerpf(pick3(shi, 0.03, 0.92, 0.5), pick3(shi, 0.92, 0.5, 0.04), sht);
+envrel = lerpf(pick3(shi, 0.03, 0.04, 0.5), pick3(shi, 0.04, 0.5, 0.92), sht);
+
+// Clock: Live's tempo when synced, else our own.
+hosttempo = hostspb > 1 ? 60 * sr / hostspb : tempo;
+bpm = clamp(sync > 0.5 ? hosttempo : tempo, 20, 400);
+mult = pick6(timesel, 0.25, 0.5, 1, 2, 4, 8);
+stepsamps = clamp(sr * 60 / (bpm * mult), sr * 0.02, sr * 8);
+if ((sync > 0.5) && (hostplaying > 0.5)) {
+	beatphase = clamp(in3, 0, 0.999999);
+	ppq = round(hostbeats - beatphase) + beatphase;
+	target = ppq * mult;
+	if (abs(target - steppos) > 0.01) {
+		steppos = target;
+	}
+}
+
+c1ms = exp(-1 / (0.001 * sr));
+c3ms = exp(-1 / (0.003 * sr));
+c10ms = exp(-1 / (0.010 * sr));
+c15ms = exp(-1 / (0.015 * sr));
+c25ms = exp(-1 / (0.025 * sr));
+c30ms = exp(-1 / (0.030 * sr));
+c80ms = exp(-1 / (0.080 * sr));
+
+maxgrain = floor(min(sr * 6, HN / 3));
+ducksamps = max(8, floor(sr * 0.008));
+ispattern = md == 9;
+tapcount = 1 + round(act * 3);
+tapgainsum = 0.8 + (tapcount > 1.5 ? 0.62 : 0) + (tapcount > 2.5 ? 0.5 : 0) + (tapcount > 3.5 ? 0.4 : 0);
+fbscale = ispattern ? 1 / tapgainsum : 1;
+
+// ---------- phrase looper commands ----------
+
+lcap = min(2880000, floor(sr * 60));
+lfade = max(16, floor(sr * 0.004));
+lgstep = 1 / max(1, floor(sr * 0.006));
+ldir = loopreverse > 0.5 ? -1 : 1;
+crec = change(cmdrec) != 0;
+cstop = change(cmdstop) != 0;
+cclear = change(cmdclear) != 0;
+doclose = 0;
+stopafter = 0;
+
+if (crec) {
+	lclearpend = 0;
+	if (lstate == 0) {
+		lhead = 0;
+		lstate = 1;
+	} else if (lstate == 1) {
+		doclose = 1;
+	} else if (lstate == 2) {
+		lstate = 3;
+	} else if (lstate == 3) {
+		lstate = 2;
+	} else if (lstate == 4) {
+		lhead = ldir > 0 ? 0 : llen - 1;
+		lstate = 2;
+	}
+}
+if (cstop) {
+	if (lstate == 1) {
+		doclose = 1;
+		stopafter = 1;
+	} else if (lstate != 0) {
+		lstate = 4;
+	}
+}
+if (cclear) {
+	if ((lstate == 1) || (lgain <= 0)) {
+		lstate = 0;
+		llen = 0;
+		lhead = 0;
+		lgain = 0;
+		lclearpend = 0;
+		doclose = 0;
+		stopafter = 0;
+	} else {
+		lclearpend = 1;
+		lstate = 4;
+	}
+}
+
+// ---------- phrase looper (PRE-FX hears the input; POST-FX hears last sample's output) ----------
+
+loopsm = smooth(clamp(looplevel * 0.01, 0, 1), c15ms);
+prefx = looppre > 0.5;
+linl = prefx ? in1 : lastoutl;
+linr = prefx ? in2 : lastoutr;
+lplayl = 0;
+lplayr = 0;
+if (lstate == 1) {
+	poke(lbuf, linl, lhead, 0);
+	poke(lbuf, linr, lhead, 1);
+	lhead += 1;
+	if (lhead >= lcap) {
+		doclose = 1;
+	}
+} else if (lstate != 0) {
+	running = (lstate == 2) || (lstate == 3);
+	lgain = running ? min(1, lgain + lgstep) : max(0, lgain - lgstep);
+	if ((running < 0.5) && (lgain <= 0)) {
+		if (lclearpend > 0.5) {
+			lstate = 0;
+			llen = 0;
+			lhead = 0;
+			lclearpend = 0;
+		}
+	} else if (llen > 0) {
+		lhead = clamp(lhead, 0, llen - 1);
+		lplayl = peek(lbuf, lhead, 0) * lgain;
+		lplayr = peek(lbuf, lhead, 1) * lgain;
+		if (lstate == 3) {
+			poke(lbuf, peek(lbuf, lhead, 0) + linl, lhead, 0);
+			poke(lbuf, peek(lbuf, lhead, 1) + linr, lhead, 1);
+		}
+		lhead += ldir;
+		if (lhead >= llen) {
+			lhead = 0;
+		} else if (lhead < 0) {
+			lhead = llen - 1;
+		}
+	}
+}
+if (doclose > 0.5) {
+	llen = lhead;
+	if (llen < 4 * lfade) {
+		lstate = 0;
+		llen = 0;
+		lhead = 0;
+		lgain = 0;
+	} else {
+		// Short fades at the seam so the wrap is click-free in either direction.
+		for (i = 0; i < lfade; i += 1) {
+			fg = i / lfade;
+			poke(lbuf, peek(lbuf, i, 0) * fg, i, 0);
+			poke(lbuf, peek(lbuf, i, 1) * fg, i, 1);
+			poke(lbuf, peek(lbuf, llen - 1 - i, 0) * fg, llen - 1 - i, 0);
+			poke(lbuf, peek(lbuf, llen - 1 - i, 1) * fg, llen - 1 - i, 1);
+		}
+		lhead = ldir > 0 ? 0 : llen - 1;
+		lstate = 2;
+	}
+	if ((stopafter > 0.5) && (lstate != 0)) {
+		lstate = 4;
+	}
+}
+
+srcl = in1;
+srcr = in2;
+if (prefx) {
+	srcl += loopsm * lplayl;
+	srcr += loopsm * lplayr;
+}
+
+// ---------- strum onsets ----------
+
+dostrum = 0;
+if (md == 5) {
+	xin = max(abs(srcl), abs(srcr));
+	envfast = max(xin, envfast * exp(-1 / (0.030 * sr)));
+	envslow += (xin - envslow) * (1 - exp(-1 / (0.120 * sr)));
+	if ((envfast > ((2.2 * envslow) + 0.01)) && (envfast > 0.03) && ((sampcount - lastonset) > floor(sr * 0.15))) {
+		lastonset = sampcount;
+		dostrum = 1;
+	}
+}
+
+// ---------- hold: switch once the taps have faded, duck them around each loop of the held region ----------
+
+wantfrozen = (hold > 0.5) && (filled > floor(sr * 0.05));
+switching = wantfrozen != frozen;
+nearwrap = (frozen > 0.5) && ((holdlen - holdoff) < ducksamps);
+tdtarget = (switching || nearwrap) ? 0 : 1;
+if (switching && ((tdprev < 0.002) || (tsprev < 0.002))) {
+	frozen = wantfrozen;
+	if (frozen > 0.5) {
+		holdlen = min(max(2 * stepsamps, sr * 0.25), min(sr * 8, filled - 16));
+		holdstart = writehead - holdlen;
+		holdoff = 0;
+	}
+}
+if (frozen > 0.5) {
+	holdoff += 1;
+	if (holdoff >= holdlen) {
+		holdoff -= holdlen;
+	}
+	anchor = holdstart + holdoff;
+} else {
+	anchor = writehead;
+}
+
+// ---------- events ----------
+
+steppos += 1 / stepsamps;
+stepi = floor(steppos);
+ticked = 0;
+if (stepi != laststep) {
+	laststep = stepi;
+	ticked = 1;
+}
+
+s = stepsamps;
+if (ticked && md == 5) {
+	// Strum: the clock strums on even steps when no onset has for two steps.
+	if (((sampcount - lastonset) > floor(2 * s)) && ((stepi % 2) == 0)) {
+		dostrum = 1;
+	}
+}
+
+iscont = (md == 3) || (md == 4) || (md == 10);
+docont = 0;
+if (iscont) {
+	contcd -= 1;
+	if (contcd <= 0) {
+		docont = 1;
+	}
+} else {
+	contcd = 0;
+}
+
+// Per-tick decisions shared by every grain the tick emits.
+tcount = 0;
+tlen = 0;
+tgain = 0;
+tflag = 0;
+tspeed = 1;
+tback = 1;
+if (ticked) {
+	if (md == 0) {
+		// Mosaic: up to three layers of 2-step loops at different speeds.
+		tcount = 1 + floor(act * 2.999);
+		tgain = 0.55 / sqrt(tcount);
+		tlen = floor(2 * s);
+	} else if (md == 1) {
+		// Sequence: pitched slices, sometimes ratcheted.
+		tspeed = st2rate(pick4(va,
+			pick8(seqidx % 8, 0, 12, 7, 12, 0, 12, 7, 12),
+			pick8(seqidx % 8, 0, 7, 3, 10, 0, 5, 7, 12),
+			pick8(seqidx % 8, 0, -12, 0, 12, 0, -12, 0, 12),
+			pick8(seqidx % 8, 0, 5, 7, 12, 7, 5, 0, -5)));
+		seqidx += 1;
+		seed, r0 = rnd(seed);
+		if (r0 <= (0.45 + (0.55 * act))) {
+			seed, r1 = rnd(seed);
+			tflag = (act > 0.66) && (r1 < ((act - 0.66) * 2.5));
+			tcount = tflag ? 2 : 1;
+			tlen = floor(s * (tflag ? 0.48 : 0.96));
+		}
+	} else if (md == 2) {
+		tcount = 1;
+	} else if (md == 6) {
+		// Blocks: replay, reverse, re-speed or reorder whole steps.
+		seed, r0 = rnd(seed);
+		tflag = r0 < act;
+		tback = 1;
+		tspeed = 1;
+		if (tflag) {
+			seed, r1 = rnd(seed);
+			tback = 1 + min(3, floor(r1 * 4));
+			seed, r2 = rnd(seed);
+			if ((va == 1) && (r2 < 0.5)) {
+				tspeed = -1;
+			} else if ((va == 2) && (r2 < 0.4)) {
+				seed, r3 = rnd(seed);
+				tspeed = r3 < 0.5 ? 0.5 : 2;
+			}
+		}
+		if (va == 3 && tflag) {
+			seed, r4 = rnd(seed);
+			tcount = r4 < 0.5 ? 2 : 4;
+			tlen = floor(s / tcount);
+		} else {
+			tcount = 1;
+			tlen = floor(s);
+		}
+	} else if (md == 7) {
+		// Interrupt: stutter bursts that cut the dry signal.
+		seed, r0 = rnd(seed);
+		if (r0 <= (0.15 + (0.7 * act))) {
+			bursttil = sampcount + floor(s * 0.95);
+			if (va == 3) {
+				tcount = 1;
+				tlen = floor(s * 0.95);
+			} else {
+				tcount = va == 1 ? 6 : 8;
+				tlen = max(floor(sr * 0.01), floor(s / tcount));
+			}
+		}
+	} else if (md == 8) {
+		// Arp: slices played as an arpeggio.
+		tcount = 1 + floor(act * 3.999);
+		tlen = floor(s / tcount * 0.95);
+	}
+}
+
+// One emitter for every grain request: slots 0-7 are this tick's grains, 8-11 a strum, 12 the continuous modes.
+if ((tcount > 0) || dostrum || docont) {
+	strumstagger = floor(sr * lerpf(0.09, 0.012, act));
+	strumlen = clamp(floor(s * 1.5), floor(sr * 0.15), floor(sr * 3));
+	for (k = 0; k < 13; k += 1) {
+		ok = 0;
+		dl = 0;
+		st = 0;
+		sp = 1;
+		ln = 0;
+		gn = 0;
+		pn = 0;
+		wn = 0;
+		gl = 1;
+		if (k < 8) {
+			if (k < tcount) {
+				ok = 1;
+				ln = tlen;
+				if (md == 0) {
+					seed, ra = rnd(seed);
+					if ((k > 0) && (ra > (0.5 + (0.5 * act)))) {
+						ok = 0;
+					} else {
+						seed, rb = rnd(seed);
+						ri = min(2, floor(rb * 3));
+						sp = pick4(va, pick3(ri, 1, 2, 1), pick3(ri, 0.5, 1, 2), pick3(ri, 1, 1.5, 2), pick3(ri, -1, 1, 2));
+						seed, rc = rnd(seed);
+						st = sourcestart(anchor, ln * abs(sp), sp);
+						gn = tgain;
+						pn = rc * 1.4 - 0.7;
+					}
+				} else if (md == 1) {
+					sp = tspeed;
+					span = max(ln * sp, s);
+					st = sourcestart(anchor, span, sp);
+					pn = seqidx % 2 == 1 ? 0.35 : -0.35;
+					gn = 0.8;
+					if (k == 1) {
+						dl = floor(s * 0.5);
+						gn = 0.7;
+						pn = -pn;
+					}
+				} else if (md == 2) {
+					// Glide: loops that slide in pitch over two steps.
+					seed, ra = rnd(seed);
+					semis = 12;
+					if (va == 1) {
+						semis = -12;
+					} else if (va == 2) {
+						semis = stepi % 2 == 1 ? -12 : 12;
+					} else if (va == 3) {
+						semis = pick6(min(5, floor(ra * 6)), -12, -7, -5, 5, 7, 12);
+					}
+					gl = st2rate(semis * (0.25 + 0.75 * act));
+					ln = floor(2 * s);
+					span = ln * (gl - 1) / log(gl);
+					st = sourcestart(anchor, span, 1);
+					seed, rb = rnd(seed);
+					gn = 0.55;
+					pn = rb - 0.5;
+				} else if (md == 6) {
+					latest = anchor - (tback - 1) * s;
+					gn = 0.85;
+					if (tcount > 1) {
+						dl = k * ln;
+						st = latest - s;
+					} else {
+						sp = tspeed;
+						st = sp < 0 ? latest - 2 : (latest - (max(1, sp) * s)) - 2 + (sp < 1 ? s * 0.5 : 0);
+					}
+				} else if (md == 7) {
+					gn = 0.95;
+					wn = 2;
+					if (va == 3) {
+						gl = 0.15;
+						span = ln * (gl - 1) / log(gl);
+						st = sourcestart(anchor, span, 1);
+					} else {
+						sp = va == 1 ? st2rate(2 * k) : (va == 2 ? -1 : 1);
+						st = sp < 0 ? anchor - 2 : (anchor - (ln * sp)) - 2;
+						dl = k * ln;
+					}
+				} else if (md == 8) {
+					seed, ra = rnd(seed);
+					ai = va == 3 ? min(5, floor(ra * 6)) : arpidx % (va < 1.5 ? 4 : 6);
+					semis = pick4(va,
+						pick6(ai, 0, 4, 7, 12, 4, 7),
+						pick6(ai, 12, 7, 4, 0, 7, 4),
+						pick6(ai, 0, 7, 12, 19, 12, 7),
+						pick6(ai, 0, 3, 7, 10, 12, 15));
+					arpidx += 1;
+					sp = st2rate(semis);
+					pn = arpidx % 2 == 1 ? 0.4 : -0.4;
+					dl = floor(k * s / tcount);
+					st = sourcestart(anchor, max(s, ln * sp), sp);
+					gn = 0.75;
+				} else {
+					ok = 0;
+				}
+			}
+		} else if (k < 12) {
+			if (dostrum) {
+				// Strum: a four-note chord, alternately up and down.
+				nk = k - 8;
+				note = strumup > 0.5 ? nk : 3 - nk;
+				sp = st2rate(pick4(va,
+					pick4(note, 0, 4, 7, 12),
+					pick4(note, 0, 3, 7, 10),
+					pick4(note, 0, 7, 12, 19),
+					pick4(note, 0, 5, 10, 15)));
+				ln = strumlen;
+				pn = -0.6 + 0.4 * note;
+				dl = nk * strumstagger;
+				st = sourcestart(anchor, ln * sp, sp);
+				gn = 0.42;
+				ok = 1;
+				if (nk == 3) {
+					strumup = strumup > 0.5 ? 0 : 1;
+				}
+			}
+		} else if (docont) {
+			ok = 1;
+			if (md == 3) {
+				// Haze: a dense cloud of short grains.
+				seed, ra = rnd(seed);
+				seed, rb = rnd(seed);
+				seed, rc = rnd(seed);
+				seed, rd = rnd(seed);
+				seed, re = rnd(seed);
+				interval = lerpf(0.15, 0.010, pow(act, 0.7)) * (0.5 + ra);
+				secs = lerpf(pick4(va, 0.03, 0.08, 0.2, 0.08), pick4(va, 0.09, 0.2, 0.5, 0.2), rb);
+				sp = st2rate((rc * 2 - 1) * 0.12);
+				if (va == 3) {
+					sp *= rd < 0.35 ? 2 : (rd < 0.5 ? 0.5 : 1);
+				}
+				ln = floor(sr * secs);
+				gn = 0.9 / sqrt(max(1, secs / interval));
+				st = sourcestart(anchor, ln * sp + floor(sr * re * 1.5), sp);
+				seed, rf = rnd(seed);
+				pn = rf * 2 - 1;
+				contcd = interval * sr;
+			} else if (md == 4) {
+				// Tunnel: long overlapping grains, a drone.
+				seed, ra = rnd(seed);
+				seed, rb = rnd(seed);
+				seed, rc = rnd(seed);
+				seed, rd = rnd(seed);
+				seed, re = rnd(seed);
+				interval = lerpf(0.45, 0.07, act) * (0.7 + 0.6 * ra);
+				secs = 0.8 + 1.2 * rb;
+				ri = min(2, floor(rc * 3));
+				sp = pick4(va, pick3(ri, 1, 0.5, 1), pick3(ri, 0.5, 0.25, 0.5), pick3(ri, 1, 2, 1), pick3(ri, 0.5, 1, 1.5));
+				ln = floor(sr * secs);
+				gn = 0.7 / sqrt(max(1, secs / interval));
+				st = sourcestart(anchor, ln * sp + floor(sr * (0.05 + 0.55 * rd)), sp);
+				pn = re * 1.6 - 0.8;
+				contcd = interval * sr;
+			} else {
+				// Warp: overlapping pitch-shift grains reading one step back, bent by ACTIVITY.
+				seed, ra = rnd(seed);
+				wdelay = min(s, sr * 8);
+				ln = floor(clamp(wdelay, sr * 0.06, sr * 1));
+				cents = (ra * 2 - 1) * 30 * act;
+				sp = pick4(va, 1, 2, 0.5, -1) * st2rate(cents / 100);
+				st = anchor - wdelay - 2;
+				if (sp > 1) {
+					st -= (sp - 1) * ln;
+				} else if (sp < 0) {
+					st = anchor - wdelay + ln;
+				}
+				gn = 1;
+				pn = warpflip > 0.5 ? 0.25 : -0.25;
+				wn = 1;
+				warpflip = warpflip > 0.5 ? 0 : 1;
+				contcd = ln * 0.5;
+			}
+		}
+		// schedule: countdown is stored +1 so 0 means a free slot.
+		if (ok) {
+			for (p = 0; p < NP; p += 1) {
+				if (peek(pend, p, 0) < 0.5) {
+					poke(pend, dl + 1, p, 0);
+					poke(pend, st, p, 1);
+					poke(pend, sp, p, 2);
+					poke(pend, gl, p, 3);
+					poke(pend, ln, p, 4);
+					poke(pend, gn, p, 5);
+					poke(pend, pn, p, 6);
+					poke(pend, wn, p, 7);
+					npend += 1;
+					break;
+				}
+			}
+		}
+	}
+}
+
+// ---------- pending grains -> spawn ----------
+
+if (npend > 0) {
+	for (p = 0; p < NP; p += 1) {
+		cd = peek(pend, p, 0);
+		if (cd > 0.5) {
+			if (cd < 1.5) {
+				poke(pend, 0, p, 0);
+				npend = max(0, npend - 1);
+				if (filled >= 64) {
+					st = peek(pend, p, 1);
+					sp = peek(pend, p, 2);
+					gl = peek(pend, p, 3);
+					ln = clamp(peek(pend, p, 4), 32, maxgrain);
+					gn = peek(pend, p, 5);
+					pn = clamp(peek(pend, p, 6), -1, 1);
+					wn = peek(pend, p, 7);
+					mean = 1;
+					if (abs(gl - 1) > 0.000001) {
+						mean = (gl - 1) / log(gl);
+					}
+					travel = sp * ln * mean * (1 + 2 * SEMI);
+					lo = min(st, st + travel);
+					hi = max(st, st + travel);
+					newest = writehead - 4;
+					oldest = max(writehead - filled + 4, writehead - HN + ln + 64);
+					fits = 1;
+					if (hi > newest) {
+						shift = hi - newest;
+						st -= shift;
+						lo -= shift;
+						hi -= shift;
+					}
+					if (lo < oldest) {
+						shift = oldest - lo;
+						if (hi + shift > newest) {
+							fits = 0;
+						} else {
+							st += shift;
+						}
+					}
+					if (fits) {
+						for (g = 0; g < NG; g += 1) {
+							if (peek(gr, g, 0) < 0.5) {
+								attk = 0;
+								rels = 0;
+								if (wn > 1.5) {
+									attk = min(sr * 0.002, ln * 0.25);
+									rels = attk;
+								} else {
+									attk = envatt * ln;
+									rels = envrel * ln;
+								}
+								poke(gr, 1, g, 0);
+								poke(gr, st, g, 1);
+								poke(gr, sp, g, 2);
+								poke(gr, abs(gl - 1) > 0.000001 ? pow(gl, 1 / ln) : 1, g, 3);
+								poke(gr, 0, g, 4);
+								poke(gr, ln, g, 5);
+								poke(gr, 1 / max(1, attk), g, 6);
+								poke(gr, 1 / max(1, rels), g, 7);
+								poke(gr, gn * min(1, 1 - pn), g, 8);
+								poke(gr, gn * min(1, 1 + pn), g, 9);
+								poke(gr, wn, g, 10);
+								break;
+							}
+						}
+					}
+				}
+			} else {
+				poke(pend, cd - 1, p, 0);
+			}
+		}
+	}
+}
+
+// ---------- pitch modulation ----------
+
+lfophase += clamp(modfreq, 0.01, 40) / sr;
+if (lfophase >= 1) {
+	lfophase -= 1;
+}
+lfo = sin(2 * pi * lfophase) * clamp(moddepth * 0.01, 0, 1);
+modmul = 1 + SEMI * lfo;
+
+// ---------- grains ----------
+
+wetl = 0;
+wetr = 0;
+newestr = writehead - 3;
+oldestr = writehead - HN + 8;
+for (g = 0; g < NG; g += 1) {
+	if (peek(gr, g, 0) > 0.5) {
+		age = peek(gr, g, 4);
+		glen = peek(gr, g, 5);
+		win = peek(gr, g, 10);
+		pos = peek(gr, g, 1);
+		genv = 0;
+		if ((win > 0.5) && (win < 1.5)) {
+			tri = 1 - abs(((2 * age) / glen) - 1);
+			genv = tri * tri * (3 - 2 * tri);
+		} else {
+			genv = min(1, min(age * peek(gr, g, 6), (glen - age) * peek(gr, g, 7)));
+			if (win < 0.5) {
+				genv = genv * genv * (3 - 2 * genv);
+			}
+		}
+		if (pos > newestr) {
+			pos = newestr;
+		}
+		if (pos < oldestr) {
+			poke(gr, 0, g, 0);
+		} else {
+			fl = floor(pos);
+			ft = pos - fl;
+			i1 = wrap(fl, 0, HN);
+			i0 = wrap(i1 - 1, 0, HN);
+			i2 = wrap(i1 + 1, 0, HN);
+			i3 = wrap(i1 + 2, 0, HN);
+			gsl = catmull(peek(hist, i0, 0), peek(hist, i1, 0), peek(hist, i2, 0), peek(hist, i3, 0), ft);
+			gsr = catmull(peek(hist, i0, 1), peek(hist, i1, 1), peek(hist, i2, 1), peek(hist, i3, 1), ft);
+			wetl += gsl * genv * peek(gr, g, 8);
+			wetr += gsr * genv * peek(gr, g, 9);
+			gsp = peek(gr, g, 2);
+			poke(gr, pos + gsp * modmul, g, 1);
+			poke(gr, gsp * peek(gr, g, 3), g, 2);
+			poke(gr, age + 1, g, 4);
+			if (age + 1 >= glen) {
+				poke(gr, 0, g, 0);
+			}
+		}
+	}
+}
+
+// ---------- pattern taps ----------
+
+tapunit = smooth(stepsamps, c80ms);
+tduck = smooth(tdtarget, c1ms);
+tsmooth = smooth(ispattern ? 1 : 0, c10ms);
+tdprev = tduck;
+tsprev = tsmooth;
+taplevel = tsmooth * tduck;
+if (taplevel > 0) {
+	longest = max(8, filled - 8);
+	modsamps = lfo * 0.003 * sr;
+	for (k = 0; k < 4; k += 1) {
+		if (k < tapcount) {
+			tstep = pick4(va,
+				pick4(k, 0.75, 1, 1.75, 2),
+				pick4(k, 0.5, 1, 1.5, 2),
+				pick4(k, 1 / 3, 2 / 3, 1, 4 / 3),
+				pick4(k, 0.25, 0.75, 1.25, 2));
+			tdl = clamp((tstep * tapunit) + (modsamps * (k + 1) * 0.5), 4, longest);
+			tpos = anchor - tdl;
+			fl = floor(tpos);
+			ft = tpos - fl;
+			i1 = wrap(fl, 0, HN);
+			i0 = wrap(i1 - 1, 0, HN);
+			i2 = wrap(i1 + 1, 0, HN);
+			i3 = wrap(i1 + 2, 0, HN);
+			tl = catmull(peek(hist, i0, 0), peek(hist, i1, 0), peek(hist, i2, 0), peek(hist, i3, 0), ft);
+			tr = catmull(peek(hist, i0, 1), peek(hist, i1, 1), peek(hist, i2, 1), peek(hist, i3, 1), ft);
+			tg = pick4(k, 0.8, 0.62, 0.5, 0.4) * taplevel;
+			if (k % 2 == 1) {
+				wetl += 0.35 * tg * tl;
+				wetr += tg * tr;
+			} else {
+				wetl += tg * tl;
+				wetr += 0.35 * tg * tr;
+			}
+		}
+	}
+}
+
+// ---------- interrupt dry, effect volume, resonant lowpass ----------
+
+direct = smooth(((md == 7) && (sampcount >= bursttil)) ? 1 : 0, c3ms);
+wetl += direct * srcl;
+wetr += direct * srcr;
+
+effect = smooth(dbtoa(effectdb), c15ms);
+wetl *= effect;
+wetr *= effect;
+
+cutlog = smooth(log2(clamp(cutoff, 20, 22000)), c25ms);
+res = smooth(clamp(resonance * 0.01, 0, 1), c25ms);
+q = 0.6 + (9 * res * res);
+fc = clamp(exp2(cutlog), 10, 0.49 * sr);
+fg = tan(pi * fc / sr);
+fk = 1 / max(0.05, q);
+fa1 = 1 / (1 + fg * (fg + fk));
+fa2 = fg * fa1;
+fa3 = fg * fa2;
+// Resonance trades passband for peak (as analog ladders do), so the peak stays near +10 dB.
+restrim = 1 / sqrt(max(1, q));
+filtl = svflp(wetl * restrim, fa1, fa2, fa3);
+filtr = svflp(wetr * restrim, fa1, fa2, fa3);
+
+// ---------- REPEATS feedback into the history (DC-blocked, soft-clipped) ----------
+
+feedback = smooth(clamp(repeats * 0.01, 0, 1), c30ms) * 0.93 * fbscale;
+if (frozen < 0.5) {
+	dcoutl = (filtl - dcinl) + (0.995 * dcoutl);
+	dcinl = filtl;
+	dcoutr = (filtr - dcinr) + (0.995 * dcoutr);
+	dcinr = filtr;
+	wi = wrap(writehead, 0, HN);
+	poke(hist, srcl + softclip(dcoutl * feedback), wi, 0);
+	poke(hist, srcr + softclip(dcoutr * feedback), wi, 1);
+	writehead += 1;
+	filled = min(filled + 1, HN);
+}
+
+// ---------- SPACE: 8-line FDN reverb (allpass diffusion, Hadamard, damping, modulated lines) ----------
+
+msc = sr / 1000;
+dl0 = ap0.read(max(4, floor(4.77 * msc)));
+dv0 = filtl + 0.6 * dl0;
+ap0.write(dv0);
+dx = dl0 - 0.6 * dv0;
+dl1 = ap1.read(max(4, floor(3.59 * msc)));
+dv1 = dx + 0.6 * dl1;
+ap1.write(dv1);
+diffl = dl1 - 0.6 * dv1;
+dl2 = ap2.read(max(4, floor(5.13 * msc)));
+dv2 = filtr + 0.6 * dl2;
+ap2.write(dv2);
+dx = dl2 - 0.6 * dv2;
+dl3 = ap3.read(max(4, floor(3.31 * msc)));
+dv3 = dx + 0.6 * dl3;
+ap3.write(dv3);
+diffr = dl3 - 0.6 * dv3;
+
+rvlfo += 0.37 / sr;
+if (rvlfo >= 1) {
+	rvlfo -= 1;
+}
+rmd = 12 * msc / 48;
+len0 = max(8, 29.7 * msc);
+len1 = max(8, 37.1 * msc);
+len2 = max(8, 41.1 * msc);
+len3 = max(8, 43.7 * msc);
+len4 = max(8, 53.3 * msc);
+len5 = max(8, 59.9 * msc);
+len6 = max(8, 67.7 * msc);
+len7 = max(8, 73.1 * msc);
+t0 = rv0.read(len0 + (rmd * (1 + sin(2 * pi * (rvlfo + 0.000))) * 0.7));
+t1 = rv1.read(len1 + rmd * (1 + sin(2 * pi * (rvlfo + 0.125))));
+t2 = rv2.read(len2 + (rmd * (1 + sin(2 * pi * (rvlfo + 0.250))) * 0.7));
+t3 = rv3.read(len3 + rmd * (1 + sin(2 * pi * (rvlfo + 0.375))));
+t4 = rv4.read(len4 + (rmd * (1 + sin(2 * pi * (rvlfo + 0.500))) * 0.7));
+t5 = rv5.read(len5 + rmd * (1 + sin(2 * pi * (rvlfo + 0.625))));
+t6 = rv6.read(len6 + (rmd * (1 + sin(2 * pi * (rvlfo + 0.750))) * 0.7));
+t7 = rv7.read(len7 + rmd * (1 + sin(2 * pi * (rvlfo + 0.875))));
+rooml = 0.5 * (t0 - t2 + t4 - t6);
+roomr = 0.5 * (t1 - t3 + t5 - t7);
+
+// Hadamard 8 (span 1, 2, 4), normalised by 1/sqrt(8).
+h0 = t0 + t1; h1 = t0 - t1; h2 = t2 + t3; h3 = t2 - t3;
+h4 = t4 + t5; h5 = t4 - t5; h6 = t6 + t7; h7 = t6 - t7;
+j0 = h0 + h2; j2 = h0 - h2; j1 = h1 + h3; j3 = h1 - h3;
+j4 = h4 + h6; j6 = h4 - h6; j5 = h5 + h7; j7 = h5 - h7;
+hn = 0.35355339;
+m0 = (j0 + j4) * hn; m4 = (j0 - j4) * hn;
+m1 = (j1 + j5) * hn; m5 = (j1 - j5) * hn;
+m2 = (j2 + j6) * hn; m6 = (j2 - j6) * hn;
+m3 = (j3 + j7) * hn; m7 = (j3 - j7) * hn;
+
+decay = clamp(revtime, 0.1, 60) * sr;
+damp = 0.35;
+w0 = m0 * pow(10, -3 * len0 / decay); low0 = w0 + damp * (low0 - w0); rv0.write(low0 + diffl * 0.5);
+w1 = m1 * pow(10, -3 * len1 / decay); low1 = w1 + damp * (low1 - w1); rv1.write(low1 + diffr * 0.5);
+w2 = m2 * pow(10, -3 * len2 / decay); low2 = w2 + damp * (low2 - w2); rv2.write(low2 + diffl * 0.5);
+w3 = m3 * pow(10, -3 * len3 / decay); low3 = w3 + damp * (low3 - w3); rv3.write(low3 + diffr * 0.5);
+w4 = m4 * pow(10, -3 * len4 / decay); low4 = w4 + damp * (low4 - w4); rv4.write(low4 + diffl * 0.5);
+w5 = m5 * pow(10, -3 * len5 / decay); low5 = w5 + damp * (low5 - w5); rv5.write(low5 + diffr * 0.5);
+w6 = m6 * pow(10, -3 * len6 / decay); low6 = w6 + damp * (low6 - w6); rv6.write(low6 + diffl * 0.5);
+w7 = m7 * pow(10, -3 * len7 / decay); low7 = w7 + damp * (low7 - w7); rv7.write(low7 + diffr * 0.5);
+
+spc = smooth(clamp(space * 0.01, 0, 1), c30ms);
+// A soft ceiling at +6 dB keeps extreme settings (resonance, +12 dB, long feedback) from running away.
+effl = 2 * softclip(0.5 * ((filtl * (1 - (0.4 * spc))) + (rooml * spc * 1.1)));
+effr = 2 * softclip(0.5 * ((filtr * (1 - (0.4 * spc))) + (roomr * spc * 1.1)));
+
+wetmix = smooth(clamp(drywet * 0.01, 0, 1), c15ms);
+outl = (srcl * sqrt(1 - wetmix)) + (effl * sqrt(wetmix));
+outr = (srcr * sqrt(1 - wetmix)) + (effr * sqrt(wetmix));
+lastoutl = outl;
+lastoutr = outr;
+if (prefx < 0.5) {
+	outl += loopsm * lplayl;
+	outr += loopsm * lplayr;
+}
+sampcount += 1;
+
+out1 = fixdenorm(outl);
+out2 = fixdenorm(outr);
+out3 = lstate;
+out4 = llen > 0 ? lhead / llen : (lstate == 1 ? lhead / lcap : 0);

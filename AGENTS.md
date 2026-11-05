@@ -90,6 +90,9 @@ plugins/cosmos/       granular looper (own processor and editor; the series' one
                       cap, starfield + synthwave grid, sunset lettering), CosmosWidgets (CosmosKnob, ModeButton,
                       HoldButton)
   tests/              CosmosTests.cpp
+  m4l/                Max for Live port for Push 3 standalone: cosmos.genexpr (gen~ port of Source/dsp + Svf +
+                      FdnReverb), build_amxd.py (patcher, Live params, Push banks -> Cosmos.amxd, `--check`),
+                      Cosmos.amxd (built, checked in). Keep in step with Source/dsp; see m4l/README.md
 templates/plugin/     starter copied by scripts/new_plugin.py (placeholders __NAME__, __NAME_LOWER__, __HUE__, ...)
 .cursor/skills/       the /setup, /vst and /release skills (canonical);  .claude/skills/ holds copies made by scripts/sync_skills.sh
 scripts/              new_plugin.py, install_plugins.py (+ tests/), verify_plugin.sh, plan_release.py / tag_release.py (semver from conventional commits), release_plugin.sh (any slug; release_win_plugin.ps1 kept, unused in beta), build_mac_pkg.sh, installers/ (mac + win templates), validate/upload release helpers, format.sh, sync_skills.sh, check_repo.sh (docs/RELEASE.md)
