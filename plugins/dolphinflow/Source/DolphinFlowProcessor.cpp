@@ -3,6 +3,7 @@
 #include "DolphinFlowEditor.h"
 
 #include <animalaudio/core/ParameterFactory.h>
+#include <animalaudio/core/TransportReader.h>
 
 #include <algorithm>
 
@@ -12,6 +13,26 @@ namespace
 {
 using animalaudio::core::percentParameter;
 using animalaudio::core::unitParameter;
+
+const juce::Identifier kProgression{"Progression"};
+const juce::Identifier kSlot{"Slot"};
+const juce::Identifier kRoot{"root"};
+const juce::Identifier kShape{"shape"};
+const juce::Identifier kLength{"length"};
+
+/** First open: a deep house staple, Am7 - Fmaj7 - C - G, a bar each. */
+dsp::Slot defaultSlot(int index)
+{
+    static constexpr int roots[] = {9, 5, 0, 7};
+    static constexpr int shapes[] = {4, 3, 0, 0};
+    dsp::Slot slot;
+    if (index < 4)
+    {
+        slot.root = roots[index];
+        slot.shape = shapes[index];
+    }
+    return slot;
+}
 
 juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
 {
@@ -35,6 +56,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
     layout.add(percentParameter(ids::space, "Space", 0.25f));
     layout.add(percentParameter(ids::level, "Level", 0.7f));
     layout.add(std::make_unique<juce::AudioParameterBool>(ids::latch, "Latch", false));
+    layout.add(std::make_unique<juce::AudioParameterBool>(ids::loop, "Loop", false));
     return layout;
 }
 } // namespace
@@ -54,6 +76,10 @@ DolphinFlowProcessor::DolphinFlowProcessor()
     spaceParam = apvts.getRawParameterValue(ids::space.getParamID());
     levelParam = apvts.getRawParameterValue(ids::level.getParamID());
     latchParam = apvts.getRawParameterValue(ids::latch.getParamID());
+    loopParam = apvts.getRawParameterValue(ids::loop.getParamID());
+    for (int i = 0; i < dsp::kNumSlots; ++i)
+        slotState[static_cast<std::size_t>(i)].store(defaultSlot(i).pack());
+    loadSlotsFromState();
 
     pushSettings();
     engine.prepare(44100.0);
@@ -85,6 +111,8 @@ void DolphinFlowProcessor::pushSettings() noexcept
     s.width = widthParam->load();
     s.space = spaceParam->load();
     s.level = levelParam->load();
+    settledVoices = s.voices;
+    settledCentre = s.centre;
     engine.setSettings(s);
 }
 
@@ -93,6 +121,9 @@ void DolphinFlowProcessor::prepareToPlay(double sampleRate, int)
     heldCount = 0;
     intent = {};
     outCount = 0;
+    sequencing = false;
+    sequenceSlot = -1;
+    playingSlot.store(-1);
     midiOut.ensureSize(4096);
     lastShape = currentShape();
     lastLatch = latchParam->load() > 0.5f;
@@ -259,6 +290,31 @@ void DolphinFlowProcessor::drainUiEvents() noexcept
     handle(scope.startIndex2, scope.blockSize2);
 }
 
+void DolphinFlowProcessor::stepSequencer(const dsp::Slots& slots, double& samplesToBoundary,
+                                         double beatsPerSample) noexcept
+{
+    const auto at = dsp::locate(slots, sequenceBeats);
+    if (at.slot < 0)
+        return;
+    const auto& slot = slots[at.slot];
+    // A new square, an edit to the playing one, or the loop coming round on a single square: play it.
+    const bool changed = at.slot != sequenceSlot || slot.root != sequenceChord.root ||
+                         slot.shape != sequenceChord.shape || at.into + 1.0e-9 < sequenceInto;
+    if (changed)
+    {
+        if (sequenceSlot < 0)
+            engine.playChordVoiced(dsp::settledVoicing(slots, at.slot, settledVoices, settledCentre), slot.root,
+                                   slot.shape);
+        else
+            engine.playChord(slot.root, slot.shape);
+        sequenceSlot = at.slot;
+        sequenceChord = slot;
+    }
+    sequenceInto = at.into;
+    samplesToBoundary = std::max(1.0, std::ceil(at.left / beatsPerSample - 1.0e-6));
+    slotProgress.store(static_cast<float>(at.into / slot.beats()), std::memory_order_relaxed);
+}
+
 void DolphinFlowProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
     juce::ScopedNoDenormals noDenormals;
@@ -274,47 +330,92 @@ void DolphinFlowProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::
     }
 
     pushSettings();
+
+    // The arrangement loop: locked to the host's beat position while it plays, else free-running from the start.
+    dsp::Slot slots[dsp::kNumSlots];
+    for (int i = 0; i < dsp::kNumSlots; ++i)
+        slots[i] = dsp::Slot::unpack(slotState[static_cast<std::size_t>(i)].load(std::memory_order_relaxed));
+    const auto transport = animalaudio::core::readTransport(getPlayHead());
+    const double bpm = animalaudio::dsp::bpmOr(transport, 120.0);
+    tempo.store(bpm, std::memory_order_relaxed);
+    const double beatsPerSample = bpm / 60.0 / std::max(1.0, getSampleRate());
+    const bool hostClock = transport.playing && transport.hasPpq;
+    const bool runLoop = loopParam->load() > 0.5f && dsp::loopBeats(slots) > 0.0;
+    if (runLoop && !sequencing)
+    {
+        sequencing = true;
+        sequenceSlot = -1;
+        sequenceInto = 0.0;
+        sequenceBeats = 0.0;
+    }
+    else if (!runLoop && sequencing)
+    {
+        sequencing = false;
+        sequenceSlot = -1;
+        intent = {};
+        engine.release();
+    }
+    if (sequencing && hostClock)
+        sequenceBeats = transport.ppq;
+
     drainUiEvents();
-    resolve();
+    if (!sequencing)
+        resolve();
 
     // A new chord quality re-voices a latched chord too; switching LATCH off lets a latched chord go.
     const int shape = currentShape();
     if (shape != lastShape)
     {
         lastShape = shape;
-        if (intent.kind == Intent::Kind::None && engine.isHeld() && engine.getRoot() >= 0)
+        if (!sequencing && intent.kind == Intent::Kind::None && engine.isHeld() && engine.getRoot() >= 0)
             engine.playChord(engine.getRoot(), shape);
     }
     const bool latch = latchParam->load() > 0.5f;
-    if (lastLatch && !latch && heldCount == 0)
+    if (!sequencing && lastLatch && !latch && heldCount == 0)
         engine.release();
     lastLatch = latch;
     syncMidiOut(0);
 
     float* pointers[dsp::DolphinFlowEngine::kMaxChannels] = {};
     int done = 0;
-    const auto renderTo = [&](int end)
+    auto it = midi.cbegin();
+    const auto applyMidiAt = [&](int at)
     {
-        if (end <= done)
-            return;
-        for (int channel = 0; channel < channels; ++channel)
-            pointers[channel] = buffer.getWritePointer(channel, done);
-        engine.process(pointers, channels, end - done);
-        done = end;
+        // Messages sharing a timestamp are applied together, so a chord from a clip lands as one chord.
+        while (it != midi.cend() && std::clamp((*it).samplePosition, 0, numSamples) <= at)
+        {
+            const int position = (*it).samplePosition;
+            for (; it != midi.cend() && (*it).samplePosition == position; ++it)
+                handleMidiMessage((*it).getMessage());
+            if (!sequencing)
+                resolve(); // while the loop plays, keys still track but the loop owns the sound
+            syncMidiOut(std::min(at, std::max(0, numSamples - 1)));
+        }
     };
 
-    // Messages sharing a timestamp are applied together, so a chord from a clip lands as one chord.
-    for (auto it = midi.cbegin(); it != midi.cend();)
+    while (done < numSamples)
     {
-        const int position = (*it).samplePosition;
-        const int at = std::clamp(position, 0, numSamples);
-        renderTo(at);
-        for (; it != midi.cend() && (*it).samplePosition == position; ++it)
-            handleMidiMessage((*it).getMessage());
-        resolve();
-        syncMidiOut(std::min(at, std::max(0, numSamples - 1)));
+        applyMidiAt(done);
+        int next = numSamples;
+        if (sequencing)
+        {
+            double toBoundary = 0.0;
+            stepSequencer(slots, toBoundary, beatsPerSample);
+            syncMidiOut(done);
+            next = static_cast<int>(std::min<double>(next, done + toBoundary));
+        }
+        if (it != midi.cend())
+            next = std::min(next, std::clamp((*it).samplePosition, 0, numSamples));
+        next = std::max(next, done + 1);
+        for (int channel = 0; channel < channels; ++channel)
+            pointers[channel] = buffer.getWritePointer(channel, done);
+        engine.process(pointers, channels, next - done);
+        if (sequencing)
+            sequenceBeats += (next - done) * beatsPerSample;
+        done = next;
     }
-    renderTo(numSamples);
+    applyMidiAt(numSamples);
+    playingSlot.store(sequencing ? sequenceSlot : -1, std::memory_order_relaxed);
     midi.swapWith(midiOut);
 }
 
@@ -357,6 +458,97 @@ float DolphinFlowProcessor::getParameterValue(const juce::ParameterID& id) const
     return apvts.getRawParameterValue(id.getParamID())->load();
 }
 
+dsp::Slot DolphinFlowProcessor::getSlot(int index) const noexcept
+{
+    if (index < 0 || index >= dsp::kNumSlots)
+        return {};
+    return dsp::Slot::unpack(slotState[static_cast<std::size_t>(index)].load(std::memory_order_relaxed));
+}
+
+void DolphinFlowProcessor::setSlot(int index, const dsp::Slot& slot)
+{
+    if (index < 0 || index >= dsp::kNumSlots)
+        return;
+    slotState[static_cast<std::size_t>(index)].store(slot.pack(), std::memory_order_relaxed);
+    auto progression = apvts.state.getOrCreateChildWithName(kProgression, nullptr);
+    while (progression.getNumChildren() < dsp::kNumSlots)
+        progression.appendChild(juce::ValueTree(kSlot), nullptr);
+    auto node = progression.getChild(index);
+    node.setProperty(kRoot, slot.root, nullptr);
+    node.setProperty(kShape, slot.shape, nullptr);
+    node.setProperty(kLength, slot.lengthIndex, nullptr);
+}
+
+void DolphinFlowProcessor::loadSlotsFromState()
+{
+    const auto progression = apvts.state.getChildWithName(kProgression);
+    for (int i = 0; i < dsp::kNumSlots; ++i)
+    {
+        dsp::Slot slot = getSlot(i);
+        if (progression.isValid() && i < progression.getNumChildren())
+        {
+            const auto node = progression.getChild(i);
+            slot.root = std::clamp(static_cast<int>(node.getProperty(kRoot, -1)), -1, 11);
+            slot.shape = std::clamp(static_cast<int>(node.getProperty(kShape, 0)), 0, dsp::kNumChordShapes - 1);
+            slot.lengthIndex = std::clamp(static_cast<int>(node.getProperty(kLength, dsp::kDefaultLengthIndex)), 0,
+                                          dsp::kNumSlotLengths - 1);
+        }
+        setSlot(i, slot); // also writes the tree when the saved state had none
+    }
+}
+
+bool DolphinFlowProcessor::writeMidiClip(const juce::File& file) const
+{
+    dsp::Slot slots[dsp::kNumSlots];
+    for (int i = 0; i < dsp::kNumSlots; ++i)
+        slots[i] = getSlot(i);
+    const double total = dsp::loopBeats(slots);
+    if (total <= 0.0)
+        return false;
+
+    const int voices =
+        dsp::kMinVoices + std::clamp(juce::roundToInt(voicesParam->load()), 0, dsp::kMaxVoices - dsp::kMinVoices);
+    const int centre = dsp::kDefaultCentre + 12 * juce::roundToInt(octaveParam->load());
+    constexpr int ticksPerBeat = 960;
+    const auto ticks = [](double beats) { return std::round(beats * ticksPerBeat); };
+
+    juce::MidiMessageSequence track;
+    track.addEvent(juce::MidiMessage::textMetaEvent(3, "Dolphin Flow"), 0.0);
+    track.addEvent(juce::MidiMessage::tempoMetaEvent(juce::roundToInt(60.0e6 / getTempo())), 0.0);
+    track.addEvent(juce::MidiMessage::timeSignatureMetaEvent(4, 4), 0.0);
+    for (const auto& note : dsp::buildClip(slots, voices, centre))
+    {
+        track.addEvent(juce::MidiMessage::noteOn(kMidiChannel, note.note, static_cast<juce::uint8>(kKeyVelocity)),
+                       ticks(note.start));
+        track.addEvent(juce::MidiMessage::noteOff(kMidiChannel, note.note), ticks(note.end));
+    }
+    track.addEvent(juce::MidiMessage::endOfTrack(), ticks(total));
+    track.sort();
+    track.updateMatchedPairs();
+
+    juce::MidiFile midiFile;
+    midiFile.setTicksPerQuarterNote(ticksPerBeat);
+    midiFile.addTrack(track);
+    if (!file.getParentDirectory().createDirectory())
+        return false;
+    file.deleteFile();
+    juce::FileOutputStream out(file);
+    return out.openedOk() && midiFile.writeTo(out, 1);
+}
+
+juce::File DolphinFlowProcessor::defaultClipFile() const
+{
+    juce::StringArray names;
+    for (int i = 0; i < dsp::kNumSlots; ++i)
+        if (const auto slot = getSlot(i); !slot.isEmpty())
+            names.add(juce::String(dsp::pitchClassName(slot.root)) + dsp::chordShape(slot.shape).symbol);
+    const auto name = juce::File::createLegalFileName("Dolphin Flow - " + names.joinIntoString(" ") + ".mid");
+    return juce::File::getSpecialLocation(juce::File::userMusicDirectory)
+        .getChildFile("Animal Audio")
+        .getChildFile("Dolphin Flow")
+        .getChildFile(name);
+}
+
 void DolphinFlowProcessor::getStateInformation(juce::MemoryBlock& destData)
 {
     if (const auto xml = apvts.copyState().createXml())
@@ -367,7 +559,10 @@ void DolphinFlowProcessor::setStateInformation(const void* data, int sizeInBytes
 {
     if (const auto xml = getXmlFromBinary(data, sizeInBytes))
         if (xml->hasTagName(apvts.state.getType()))
+        {
             apvts.replaceState(juce::ValueTree::fromXml(*xml));
+            loadSlotsFromState();
+        }
 }
 
 juce::AudioProcessorEditor* DolphinFlowProcessor::createEditor()

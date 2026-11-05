@@ -151,6 +151,19 @@ void DolphinFlowEngine::playChord(int rootPitchClass, int shapeIndex) noexcept
     gateOn();
 }
 
+void DolphinFlowEngine::playChordVoiced(const Voicing& next, int rootPitchClass, int shapeIndex) noexcept
+{
+    if (next.count < kMinVoices)
+    {
+        playChord(rootPitchClass, shapeIndex);
+        return;
+    }
+    root = pitchClassOf(rootPitchClass);
+    shape = std::clamp(shapeIndex, 0, kNumChordShapes - 1);
+    applyVoicing(next, hasChord && stage != Stage::Idle);
+    gateOn();
+}
+
 void DolphinFlowEngine::playVoicing(const Voicing& notes) noexcept
 {
     Voicing next;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "dsp/DolphinFlowEngine.h"
+#include "dsp/Progression.h"
 
 #include <juce_audio_processors/juce_audio_processors.h>
 
@@ -22,6 +23,7 @@ inline const juce::ParameterID width{"width", 1};
 inline const juce::ParameterID space{"space", 1};
 inline const juce::ParameterID level{"level", 1};
 inline const juce::ParameterID latch{"latch", 1};
+inline const juce::ParameterID loop{"loop", 1};
 } // namespace ids
 
 /**
@@ -68,6 +70,18 @@ public:
     /** Sets a parameter as a user gesture (so hosts record it), from a key press or click. */
     void setParameterFromUi(const juce::ParameterID& id, float realValue);
     float getParameterValue(const juce::ParameterID& id) const;
+
+    // Arrangement: eight chord squares that loop while LOOP is on. Message thread, except the getters marked any.
+    dsp::Slot getSlot(int index) const noexcept; // any thread
+    void setSlot(int index, const dsp::Slot& slot);
+    /** Slot the loop is playing (-1 when not looping) and how far through it, 0..1. Any thread. */
+    int getPlayingSlot() const noexcept { return playingSlot.load(std::memory_order_relaxed); }
+    float getSlotProgress() const noexcept { return slotProgress.load(std::memory_order_relaxed); }
+    double getTempo() const noexcept { return tempo.load(std::memory_order_relaxed); }
+    /** One pass of the loop as a standard MIDI file, voiced as it plays. False if empty or unwritable. */
+    bool writeMidiClip(const juce::File& file) const;
+    /** ~/Music/Animal Audio/Dolphin Flow/Dolphin Flow - <chords>.mid */
+    juce::File defaultClipFile() const;
 
     const dsp::DolphinFlowEngine& getEngine() const noexcept { return engine; }
 
@@ -133,6 +147,8 @@ private:
     void handleMidiMessage(const juce::MidiMessage& message) noexcept;
     void drainUiEvents() noexcept;
     void postUiEvent(const UiEvent& event);
+    void loadSlotsFromState();
+    void stepSequencer(const dsp::Slots& slots, double& samplesToBoundary, double beatsPerSample) noexcept;
 
     dsp::DolphinFlowEngine engine;
 
@@ -145,6 +161,18 @@ private:
     int outCount = 0;
     int lastShape = 0;
     bool lastLatch = false;
+
+    std::array<std::atomic<int>, dsp::kNumSlots> slotState{};
+    bool sequencing = false;
+    double sequenceBeats = 0.0;
+    int sequenceSlot = -1;
+    dsp::Slot sequenceChord;
+    double sequenceInto = 0.0;
+    int settledVoices = 4;
+    int settledCentre = dsp::kDefaultCentre;
+    std::atomic<int> playingSlot{-1};
+    std::atomic<float> slotProgress{0.0f};
+    std::atomic<double> tempo{120.0};
 
     std::array<UiEvent, 128> uiEvents{};
     juce::AbstractFifo uiFifo{128};
@@ -160,6 +188,7 @@ private:
     std::atomic<float>* spaceParam = nullptr;
     std::atomic<float>* levelParam = nullptr;
     std::atomic<float>* latchParam = nullptr;
+    std::atomic<float>* loopParam = nullptr;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(DolphinFlowProcessor)
 };

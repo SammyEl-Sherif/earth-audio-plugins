@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DolphinFlowProcessor.h"
+#include "ui/ArrangeView.h"
 #include "ui/DolphinFlowTheme.h"
 
 #include <animalaudio/ui/BrandBadge.h>
@@ -9,6 +10,7 @@
 #include <animalaudio/ui/ThemedKnob.h>
 
 #include <array>
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -31,6 +33,7 @@ public:
 
     bool isBlack() const noexcept;
     void setLit(bool shouldBeLit);
+    std::function<void(int)> onPress; // after the root is sent to the processor
 
 private:
     DolphinFlowProcessor& processor;
@@ -65,6 +68,17 @@ public:
     juce::Button& getOctaveDownButton() noexcept { return octaveDown; }
     juce::Button& getOctaveUpButton() noexcept { return octaveUp; }
     RootKey& getRootKey(int pitchClass) noexcept { return *rootKeys[static_cast<std::size_t>(pitchClass)]; }
+    ui::ArrangeView& getArrangeView() noexcept { return arrange; }
+    juce::Button& getKeysTab() noexcept { return keysTab; }
+    juce::Button& getArrangeTab() noexcept { return arrangeTab; }
+
+    enum class View
+    {
+        Keys = 0,
+        Arrange
+    };
+    View getView() const noexcept { return view; }
+    void setView(View newView);
 
     /** Advances the display as the timer would (tests call it without a message loop). */
     void refresh();
@@ -80,6 +94,7 @@ private:
 
     void timerCallback() override { refresh(); }
     void stepOctave(int delta);
+    void rootPlayed(int pitchClass);
     void releaseHeldKeys();
     std::unique_ptr<animalaudio::ui::ChoicePillRow> makePills(const juce::ParameterID& id, const juce::String& tooltip,
                                                               bool upperCase);
@@ -103,6 +118,10 @@ private:
     animalaudio::ui::PillButton octaveUp;
     std::unique_ptr<juce::ButtonParameterAttachment> latchAttachment;
     std::array<std::unique_ptr<RootKey>, 12> rootKeys;
+    animalaudio::ui::PillButton keysTab;
+    animalaudio::ui::PillButton arrangeTab;
+    ui::ArrangeView arrange;
+    View view = View::Keys;
 
     std::array<int, 12> heldKeyCodes{}; // computer key held for each root, 0 when up
     std::array<std::array<float, dsp::kMaxVoices>, kHistory> history{};

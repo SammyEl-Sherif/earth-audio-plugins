@@ -2,6 +2,7 @@ set(DOLPHINFLOW_SOURCES
     Source/DolphinFlowEditor.cpp
     Source/DolphinFlowProcessor.cpp
     Source/dsp/DolphinFlowEngine.cpp
+    Source/ui/ArrangeView.cpp
     Source/ui/DolphinFlowMotif.cpp
     Source/ui/DolphinFlowTheme.cpp)
 

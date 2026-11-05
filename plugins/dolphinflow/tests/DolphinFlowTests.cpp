@@ -30,7 +30,7 @@ namespace
 {
 constexpr double kRate = 48000.0;
 constexpr int kMaj = 0, kMin = 1, kDom7 = 2, kMin9 = 9;
-constexpr int C = 0, D = 2, E = 4, F = 5, G = 7, A = 9;
+constexpr int C = 0, D = 2, E = 4, F = 5, G = 7, A = 9, B_ = 11;
 
 Voicing voicing(std::initializer_list<int> notes)
 {
@@ -607,6 +607,182 @@ TEST_CASE("dolphinflow: state round trip")
     REQUIRE(paramValue(b, dolphinflow::ids::octave) == -1.0f);
 }
 
+// ---- arrangement --------------------------------------------------------------------------------------------
+
+namespace
+{
+using dolphinflow::dsp::Slot;
+
+void processSamples(Harness& h, int samples, int blockSize = 512)
+{
+    for (int done = 0; done < samples; done += blockSize)
+        processBlock(h, std::min(blockSize, samples - done));
+}
+
+constexpr int kBeat = 24000; // samples per beat at 120 BPM, 48 kHz
+} // namespace
+
+TEST_CASE("dolphinflow: slots pack, locate and default to a progression")
+{
+    for (int root = -1; root < 12; ++root)
+        for (int shape = 0; shape < dolphinflow::dsp::kNumChordShapes; ++shape)
+            for (int length = 0; length < dolphinflow::dsp::kNumSlotLengths; ++length)
+            {
+                const Slot slot{root, shape, length};
+                REQUIRE(Slot::unpack(slot.pack()) == slot);
+            }
+
+    dolphinflow::DolphinFlowProcessor p;
+    REQUIRE(p.getSlot(0) == Slot{A, 4, 3});
+    REQUIRE(p.getSlot(3) == Slot{G, kMaj, 3});
+    REQUIRE(p.getSlot(4).isEmpty());
+
+    Slot slots[dolphinflow::dsp::kNumSlots] = {{C, 0, 3}, {}, {F, 0, 1}, {G, 0, 0}};
+    REQUIRE(dolphinflow::dsp::loopBeats(slots) == Catch::Approx(7.0));
+    REQUIRE(dolphinflow::dsp::locate(slots, 3.5).slot == 0);
+    REQUIRE(dolphinflow::dsp::locate(slots, 4.5).slot == 2); // empty square skipped
+    REQUIRE(dolphinflow::dsp::locate(slots, 6.25).slot == 3);
+    REQUIRE(dolphinflow::dsp::locate(slots, 7.5).slot == 0); // wraps
+    REQUIRE(dolphinflow::dsp::locate(slots, 6.25).left == Catch::Approx(0.75));
+}
+
+TEST_CASE("dolphinflow: LOOP plays the squares in order and comes round")
+{
+    Harness h(kRate, 512); // no host tempo: 120 BPM
+    h.setParam(dolphinflow::ids::loop, 1.0f);
+    const auto& engine = h.processor.getEngine();
+
+    processSamples(h, kBeat);
+    REQUIRE(h.processor.getPlayingSlot() == 0);
+    REQUIRE(engine.getRoot() == A);
+    REQUIRE(engine.getShape() == 4);
+    const auto firstPass = voicedNotes(h.processor);
+
+    processSamples(h, 4 * kBeat);
+    REQUIRE(h.processor.getPlayingSlot() == 1);
+    REQUIRE(engine.getRoot() == F);
+    processSamples(h, 8 * kBeat);
+    REQUIRE(h.processor.getPlayingSlot() == 3);
+    REQUIRE(engine.getRoot() == G);
+    processSamples(h, 4 * kBeat);
+    REQUIRE(h.processor.getPlayingSlot() == 0);
+    REQUIRE(voicedNotes(h.processor) == firstPass); // the first pass already sounds like every later one
+
+    h.setParam(dolphinflow::ids::loop, 0.0f);
+    processBlock(h);
+    REQUIRE(h.processor.getPlayingSlot() == -1);
+    REQUIRE_FALSE(engine.isHeld());
+}
+
+TEST_CASE("dolphinflow: chord changes land on the beat, at each square's length")
+{
+    Harness h(kRate, 512);
+    h.processor.setSlot(0, {C, kMaj, 1}); // 2 beats
+    h.processor.setSlot(1, {F, kMaj, 0}); // 1 beat
+    h.setParam(dolphinflow::ids::loop, 1.0f);
+    processSamples(h, 2 * kBeat, 1); // samples 0 .. 47999: beats 0 to 2
+    REQUIRE(h.processor.getEngine().getRoot() == C);
+    processSamples(h, 1, 1); // sample 48000 is beat 2
+    REQUIRE(h.processor.getEngine().getRoot() == F);
+}
+
+TEST_CASE("dolphinflow: LOOP follows the host's beat position while it plays")
+{
+    Harness h(kRate, 512);
+    juce::AudioPlayHead::PositionInfo position;
+    position.setIsPlaying(true);
+    position.setBpm(124.0);
+    position.setPpqPosition(9.0); // bar 3: the third square
+    h.playHead.position = position;
+    h.setParam(dolphinflow::ids::loop, 1.0f);
+    processBlock(h);
+    REQUIRE(h.processor.getPlayingSlot() == 2);
+    REQUIRE(h.processor.getEngine().getRoot() == C);
+    REQUIRE(h.processor.getTempo() == Catch::Approx(124.0));
+}
+
+TEST_CASE("dolphinflow: an empty arrangement stays silent, and the loop's notes come out as MIDI")
+{
+    Harness h(kRate, 512);
+    for (int i = 0; i < dolphinflow::dsp::kNumSlots; ++i)
+        h.processor.setSlot(i, {});
+    h.setParam(dolphinflow::ids::loop, 1.0f);
+    processBlock(h);
+    REQUIRE(h.processor.getPlayingSlot() == -1);
+    REQUIRE_FALSE(h.processor.getEngine().isHeld());
+
+    h.processor.setSlot(5, {E, kMin, 3});
+    const auto out = processAndCollect(h);
+    REQUIRE(h.processor.getPlayingSlot() == 5);
+    REQUIRE(notesWhere(out, true) == voicedNotes(h.processor));
+}
+
+TEST_CASE("dolphinflow: the MIDI clip is one pass of the loop, voiced as it plays")
+{
+    dolphinflow::DolphinFlowProcessor p;
+    const auto file = juce::File::createTempFile(".mid");
+    REQUIRE(p.writeMidiClip(file));
+    REQUIRE(p.defaultClipFile().getFileName() == "Dolphin Flow - Am7 Fmaj7 C G.mid");
+
+    juce::FileInputStream in(file);
+    juce::MidiFile midiFile;
+    REQUIRE(midiFile.readFrom(in));
+    REQUIRE(midiFile.getTimeFormat() == 960);
+    const auto* track = midiFile.getTrack(0);
+    REQUIRE(track != nullptr);
+
+    std::vector<int> firstChord;
+    double lastOff = 0.0;
+    int ons = 0;
+    for (int i = 0; i < track->getNumEvents(); ++i)
+    {
+        const auto& m = track->getEventPointer(i)->message;
+        if (m.isNoteOn())
+        {
+            ++ons;
+            if (m.getTimeStamp() == 0.0)
+                firstChord.push_back(m.getNoteNumber());
+        }
+        if (m.isNoteOff())
+            lastOff = std::max(lastOff, m.getTimeStamp());
+    }
+    std::sort(firstChord.begin(), firstChord.end());
+    REQUIRE(lastOff == Catch::Approx(16.0 * 960.0)); // four bars
+    REQUIRE(firstChord.size() >= 3);
+    REQUIRE(ons < 16); // common tones are tied across chords, not re-struck
+
+    dolphinflow::dsp::Slot slots[dolphinflow::dsp::kNumSlots];
+    for (int i = 0; i < dolphinflow::dsp::kNumSlots; ++i)
+        slots[i] = p.getSlot(i);
+    const auto settled = dolphinflow::dsp::settledVoicing(slots, 0, 4, 60);
+    std::vector<int> expected(settled.notes, settled.notes + settled.count);
+    std::sort(expected.begin(), expected.end());
+    expected.erase(std::unique(expected.begin(), expected.end()), expected.end());
+    REQUIRE(firstChord == expected);
+    file.deleteFile();
+
+    for (int i = 0; i < dolphinflow::dsp::kNumSlots; ++i)
+        p.setSlot(i, {});
+    REQUIRE_FALSE(p.writeMidiClip(file));
+}
+
+TEST_CASE("dolphinflow: the arrangement is saved with the plugin state")
+{
+    dolphinflow::DolphinFlowProcessor a;
+    a.setSlot(0, {D, kMin9, 5});
+    a.setSlot(6, {B_, kDom7, 0});
+    a.setSlot(2, {});
+    juce::MemoryBlock state;
+    a.getStateInformation(state);
+
+    dolphinflow::DolphinFlowProcessor b;
+    b.setStateInformation(state.getData(), static_cast<int>(state.getSize()));
+    REQUIRE(b.getSlot(0) == Slot{D, kMin9, 5});
+    REQUIRE(b.getSlot(6) == Slot{B_, kDom7, 0});
+    REQUIRE(b.getSlot(2).isEmpty());
+    REQUIRE(b.getSlot(1) == a.getSlot(1));
+}
+
 // ---- editor ------------------------------------------------------------------------------------------------
 
 TEST_CASE("dolphinflow: editor renders headlessly")
@@ -696,6 +872,74 @@ TEST_CASE("dolphinflow: editor controls drive their parameters")
     auto* tone = processor.apvts.getParameter(dolphinflow::ids::tone.getParamID());
     tone->setValueNotifyingHost(0.2f);
     REQUIRE(editor->getKnob(dolphinflow::ids::tone).getValue() == Catch::Approx(0.2).margin(0.002));
+}
+
+TEST_CASE("dolphinflow: arrange view writes chords into squares")
+{
+    juce::ScopedJuceInitialiser_GUI gui;
+    Harness h(kRate, 512);
+    std::unique_ptr<dolphinflow::DolphinFlowEditor> editor(
+        static_cast<dolphinflow::DolphinFlowEditor*>(h.processor.createEditor()));
+    animalaudio::testing::click(editor->getArrangeTab());
+    REQUIRE(editor->getView() == dolphinflow::DolphinFlowEditor::View::Arrange);
+    auto& arrange = editor->getArrangeView();
+    REQUIRE(arrange.isVisible());
+
+    arrange.select(4);
+    REQUIRE(editor->keyPressed(juce::KeyPress('2', {}, '2'))); // MIN
+    REQUIRE(editor->keyPressed(juce::KeyPress('d', {}, 'd'))); // E
+    REQUIRE(h.processor.getSlot(4) == Slot{E, kMin, dolphinflow::dsp::kDefaultLengthIndex});
+    REQUIRE(arrange.getSelected() == 5);
+    editor->keyStateChanged(false);
+
+    REQUIRE(editor->keyPressed(juce::KeyPress(juce::KeyPress::leftKey)));
+    REQUIRE(arrange.getSelected() == 4);
+    auto& cell = arrange.getCell(4);
+    const auto up = cell.lengthUpArea().getCentre();
+    cell.mouseDown(animalaudio::testing::makeMouseEvent(cell, up));
+    REQUIRE(h.processor.getSlot(4).lengthIndex == dolphinflow::dsp::kDefaultLengthIndex + 1);
+    REQUIRE(editor->keyPressed(juce::KeyPress(juce::KeyPress::backspaceKey)));
+    REQUIRE(h.processor.getSlot(4).isEmpty());
+
+    animalaudio::testing::click(arrange.getLoopButton());
+    REQUIRE(h.processor.getParameterValue(dolphinflow::ids::loop) > 0.5f);
+
+    // Clicking a root on screen writes too.
+    arrange.select(7);
+    h.setParam(dolphinflow::ids::chord, 3.0f);
+    editor->getRootKey(F).mouseDown(animalaudio::testing::makeMouseEvent(editor->getRootKey(F), {5.0f, 5.0f}));
+    editor->getRootKey(F).mouseUp(animalaudio::testing::makeMouseEvent(editor->getRootKey(F), {5.0f, 5.0f}));
+    REQUIRE(h.processor.getSlot(7).root == F);
+    REQUIRE(h.processor.getSlot(7).shape == 3);
+
+    animalaudio::testing::click(editor->getKeysTab());
+    REQUIRE_FALSE(arrange.isVisible());
+}
+
+TEST_CASE("dolphinflow: arrange view renders headlessly")
+{
+    juce::ScopedJuceInitialiser_GUI gui;
+    Harness h(kRate, 512);
+    h.processor.setSlot(4, {D, kMin9, 5});
+    h.processor.setSlot(5, {E, kMin, 1});
+    h.setParam(dolphinflow::ids::loop, 1.0f);
+    std::unique_ptr<dolphinflow::DolphinFlowEditor> editor(
+        static_cast<dolphinflow::DolphinFlowEditor*>(h.processor.createEditor()));
+    editor->setView(dolphinflow::DolphinFlowEditor::View::Arrange);
+    editor->getArrangeView().select(6);
+    for (int frame = 0; frame < 120; ++frame) // 4 s: into the second square
+    {
+        processBlock(h, 1600);
+        editor->refresh();
+    }
+    REQUIRE(h.processor.getPlayingSlot() == 1);
+    const auto image = editor->createComponentSnapshot(editor->getLocalBounds(), true, 2.0f);
+    int bright = 0;
+    for (int y = 0; y < image.getHeight(); y += 2)
+        for (int x = 0; x < image.getWidth(); x += 2)
+            bright += image.getPixelAt(x, y).getBrightness() > 0.55f ? 1 : 0;
+    REQUIRE(bright > 400);
+    writePngIfRequested(image, "dolphinflow-arrange.png");
 }
 
 TEST_CASE("dolphinflow: build stamp is baked in")

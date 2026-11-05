@@ -56,6 +56,8 @@ public:
 
     /** Starts the chord, or glides to it if one is already sounding. Shape -1 means unnamed (a played voicing). */
     void playChord(int rootPitchClass, int shapeIndex) noexcept;
+    /** Plays a named chord on a voicing chosen elsewhere (the sequencer's settled loop voicing). */
+    void playChordVoiced(const Voicing& voicing, int rootPitchClass, int shapeIndex) noexcept;
     /** Plays exactly these notes (lowest first), each voice gliding from its nearest-ranked old note. */
     void playVoicing(const Voicing& notes) noexcept;
     /** Lets the chord ring out with the mode's release. */

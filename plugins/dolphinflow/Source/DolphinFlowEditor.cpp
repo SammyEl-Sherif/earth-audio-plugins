@@ -100,6 +100,8 @@ void RootKey::mouseDown(const juce::MouseEvent&)
     down = true;
     repaint();
     processor.pressRoot(DolphinFlowProcessor::kKeySourceBase + 100 + pitchClass, pitchClass);
+    if (onPress)
+        onPress(pitchClass);
 }
 
 void RootKey::mouseUp(const juce::MouseEvent&)
@@ -119,6 +121,9 @@ DolphinFlowEditor::DolphinFlowEditor(DolphinFlowProcessor& plugin)
     , latchButton("LATCH", theme.palette)
     , octaveDown({}, theme.palette)
     , octaveUp({}, theme.palette)
+    , keysTab("KEYS", theme.palette)
+    , arrangeTab("ARRANGE", theme.palette)
+    , arrange(plugin, theme)
 {
     setOpaque(true);
     brand.setTooltip(animalaudio::core::buildStampLong(theme.name));
@@ -170,6 +175,7 @@ DolphinFlowEditor::DolphinFlowEditor(DolphinFlowProcessor& plugin)
     for (int pc = 0; pc < 12; ++pc)
     {
         rootKeys[static_cast<std::size_t>(pc)] = std::make_unique<RootKey>(owner, theme.palette, pc);
+        rootKeys[static_cast<std::size_t>(pc)]->onPress = [this](int played) { rootPlayed(played); };
         addAndMakeVisible(*rootKeys[static_cast<std::size_t>(pc)]);
     }
     for (int pc = 0; pc < 12; ++pc)
@@ -177,6 +183,16 @@ DolphinFlowEditor::DolphinFlowEditor(DolphinFlowProcessor& plugin)
             rootKeys[static_cast<std::size_t>(pc)]->toFront(false);
 
     addAndMakeVisible(brand);
+
+    keysTab.setTooltip("Play chords live, with the glide display.");
+    arrangeTab.setTooltip("Build an 8-chord progression that loops, and copy it as a MIDI clip.");
+    keysTab.setClickingTogglesState(false);
+    arrangeTab.setClickingTogglesState(false);
+    keysTab.onClick = [this] { setView(View::Keys); };
+    arrangeTab.onClick = [this] { setView(View::Arrange); };
+    addAndMakeVisible(keysTab);
+    addAndMakeVisible(arrangeTab);
+    addChildComponent(arrange);
 
     // Keys must reach the editor, so clicking a control never takes keyboard focus away from it.
     for (auto* child : getChildren())
@@ -190,6 +206,7 @@ DolphinFlowEditor::DolphinFlowEditor(DolphinFlowProcessor& plugin)
         column.fill(-1.0f);
 
     setSize(kWidth, kHeight);
+    setView(static_cast<int>(owner.apvts.state.getProperty("view", 0)) == 1 ? View::Arrange : View::Keys);
     refresh();
     startTimerHz(30);
 }
@@ -228,6 +245,22 @@ void DolphinFlowEditor::stepOctave(int delta)
         ids::octave, static_cast<float>(std::clamp(octave + delta, -dsp::kMaxOctaveShift, dsp::kMaxOctaveShift)));
 }
 
+void DolphinFlowEditor::setView(View newView)
+{
+    view = newView;
+    owner.apvts.state.setProperty("view", view == View::Arrange ? 1 : 0, nullptr);
+    keysTab.setToggleState(view == View::Keys, juce::dontSendNotification);
+    arrangeTab.setToggleState(view == View::Arrange, juce::dontSendNotification);
+    arrange.setVisible(view == View::Arrange);
+    repaint();
+}
+
+void DolphinFlowEditor::rootPlayed(int pitchClass)
+{
+    if (view == View::Arrange)
+        arrange.writeSelected(pitchClass, juce::roundToInt(owner.getParameterValue(ids::chord)));
+}
+
 void DolphinFlowEditor::releaseHeldKeys()
 {
     heldKeyCodes.fill(0);
@@ -249,6 +282,7 @@ bool DolphinFlowEditor::keyPressed(const juce::KeyPress& key)
             {
                 code = key.getKeyCode();
                 owner.pressRoot(DolphinFlowProcessor::kKeySourceBase + pc, pc);
+                rootPlayed(pc);
             }
             return true;
         }
@@ -262,6 +296,20 @@ bool DolphinFlowEditor::keyPressed(const juce::KeyPress& key)
     {
         stepOctave(c == 'z' ? -1 : 1);
         return true;
+    }
+    if (view == View::Arrange)
+    {
+        if (key == juce::KeyPress::backspaceKey || key == juce::KeyPress::deleteKey)
+        {
+            arrange.clearSelected();
+            return true;
+        }
+        if (key == juce::KeyPress::leftKey || key == juce::KeyPress::rightKey)
+        {
+            const int step = key == juce::KeyPress::leftKey ? dsp::kNumSlots - 1 : 1;
+            arrange.select((std::max(0, arrange.getSelected()) + step) % dsp::kNumSlots);
+            return true;
+        }
     }
     if (c == 'l')
     {
@@ -330,6 +378,8 @@ void DolphinFlowEditor::refresh()
     const bool audible = engine.getEnvelopeLevel() > 0.002f || engine.isGateOn();
     for (int pc = 0; pc < 12; ++pc)
         rootKeys[static_cast<std::size_t>(pc)]->setLit(audible && pc == root);
+    if (view == View::Arrange)
+        arrange.refresh();
     repaint();
 }
 
@@ -378,10 +428,15 @@ void DolphinFlowEditor::paintHeader(juce::Graphics& g) const
         g.setColour(palette.accent);
         g.setFont(makeFont(30.0f, true, 0.04f));
         g.drawText(symbol, readout.withHeight(36.0f), juce::Justification::centred, false);
-        juce::StringArray notes;
+        std::array<int, dsp::kMaxVoices> pitches{};
+        int heard = 0;
         for (int v = 0; v < engine.getVoiceCount(); ++v)
             if (const float pitch = engine.getVoicePitch(v); pitch >= 0.0f)
-                notes.add(noteName(juce::roundToInt(pitch)));
+                pitches[static_cast<std::size_t>(heard++)] = juce::roundToInt(pitch);
+        std::sort(pitches.begin(), pitches.begin() + heard);
+        juce::StringArray notes;
+        for (int i = 0; i < heard; ++i)
+            notes.add(noteName(pitches[static_cast<std::size_t>(i)]));
         g.setColour(palette.textDim);
         g.setFont(makeFont(11.0f, true, 0.12f));
         g.drawText(notes.joinIntoString("  "), readout.withTrimmedTop(38.0f), juce::Justification::centred, false);
@@ -554,8 +609,25 @@ void DolphinFlowEditor::paint(juce::Graphics& g)
     g.fillAll(palette.background);
     paintHeader(g);
 
-    paintPanel(g, kDisplay, "GLIDE", owner.apvts.getParameter(ids::glide.getParamID())->getCurrentValueAsText());
-    paintRibbons(g, kDisplay);
+    if (view == View::Arrange)
+    {
+        double beats = 0.0;
+        for (int i = 0; i < dsp::kNumSlots; ++i)
+            if (const auto slot = owner.getSlot(i); !slot.isEmpty())
+                beats += slot.beats();
+        const auto bars = beats / 4.0;
+        auto amount = juce::String(bars, 2);
+        while (amount.containsChar('.') && (amount.endsWithChar('0') || amount.endsWithChar('.')))
+            amount = amount.dropLastCharacters(1);
+        const auto length = amount + (amount == "1" ? " BAR" : " BARS");
+        paintPanel(g, kDisplay, "ARRANGE",
+                   length + " LOOP  /  " + juce::String(juce::roundToInt(owner.getTempo())) + " BPM");
+    }
+    else
+    {
+        paintPanel(g, kDisplay, "GLIDE", owner.apvts.getParameter(ids::glide.getParamID())->getCurrentValueAsText());
+        paintRibbons(g, kDisplay);
+    }
     paintPanel(g, kKnobPanel, "SOUND", {});
     paintKnobLabels(g);
     paintPanel(g, kKeysPanel, "ROOT", "COMPUTER KEYS  A W S E D F T G Y H U J");
@@ -575,6 +647,9 @@ void DolphinFlowEditor::paint(juce::Graphics& g)
 void DolphinFlowEditor::resized()
 {
     brand.setBounds(getWidth() - 20 - 150, 27, 150, 18);
+    keysTab.setBounds(640, 22, 62, 28);
+    arrangeTab.setBounds(708, 22, 78, 28);
+    arrange.setBounds(kDisplay.toNearestInt().reduced(14, 0).withTrimmedTop(32).withTrimmedBottom(12));
 
     const auto knobArea = kKnobPanel.toNearestInt().withTrimmedTop(32).reduced(10, 4);
     const int cellW = knobArea.getWidth() / kKnobColumns;
