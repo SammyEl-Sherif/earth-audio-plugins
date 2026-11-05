@@ -166,7 +166,7 @@ History lastoutr(0);
 // Every local variable is declared here, once, at top level. gen~'s compiler fails (gen2.dsp.Model:1455)
 // when a name is first created inside a loop or if-block and reused elsewhere, so nothing is declared in a block.
 TATT = 0; TREL = 0; TTIMES = 0; TSEQ = 0; TMOSAIC = 0; TGLIDE = 0; TARP = 0; TSTRUM = 0; THAZELO = 0; THAZEHI = 0;
-TTUNNEL = 0; TWARP = 0; TTAPS = 0; TTAPG = 0; HN = 0; NG = 0; NP = 0; SEMI = 0; sr = 0; md = 0; va = 0; act = 0; shp
+TTUNNEL = 0; TWARP = 0; TTAPS = 0; TTAPG = 0; HN = 0; histl = 0; histr = 0; NG = 0; NP = 0; SEMI = 0; sr = 0; md = 0; va = 0; act = 0; shp
 = 0; shs = 0; shi = 0; sht = 0; envatt = 0; envrel = 0; hosttempo = 0; bpm = 0; mult = 0; stepsamps = 0; beatphase =
 0; ppq = 0; target = 0; c1ms = 0; c3ms = 0; c10ms = 0; c15ms = 0; c25ms = 0; c30ms = 0; c80ms = 0; maxgrain = 0;
 ducksamps = 0; ispattern = 0; tapcount = 0; tapgainsum = 0; fbscale = 0; lcap = 0; lfade = 0; lgstep = 0; ldir = 0;
@@ -1080,8 +1080,11 @@ if (frozen < 0.5) {
 	dcoutr = (filtr - dcinr) + (0.995 * dcoutr);
 	dcinr = filtr;
 	wi = wrap(writehead, 0, HN);
-	poke(hist, srcl + softclip(dcoutl * feedback), wi, 0);
-	poke(hist, srcr + softclip(dcoutr * feedback), wi, 1);
+	// Compute into variables first: gen~ never types a user function nested directly inside poke().
+	histl = srcl + softclip(dcoutl * feedback);
+	histr = srcr + softclip(dcoutr * feedback);
+	poke(hist, histl, wi, 0);
+	poke(hist, histr, wi, 1);
 	writehead += 1;
 	filled = min(filled + 1, HN);
 }

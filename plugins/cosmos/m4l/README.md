@@ -51,10 +51,11 @@ Keep the GenExpr in step with `Source/dsp` when the engine changes. Parenthesize
 more operators of mixed precedence, for example `(a > b) && ((c - d) < e)`. GenExpr parsers don't all nest
 these the same way.
 
-Declare every local variable once at top level (the block near the top of `cosmos.genexpr`). Never create a
-name inside a loop or if-block and reuse it elsewhere: that also trips `gen2.dsp.Model:1455`.
+Never pass a user function's result straight into `poke()` (or `Delay.write()`): assign it to a variable first.
+gen~'s type pass never types a user function nested inside `poke()`, so code generation fails with
+`gen2.dsp.Model:1455: assertion failed` and the whole device goes silent. That was the cause of the first
+"no audio" bug.
 
-Keep user functions flat. Don't call a user function from another user function, don't pass one user function's
-result straight into another, and don't return multiple values. Max's gen~ compiler can mis-type nested user
-function calls and fail with `gen2.dsp.Model:1455: assertion failed`, which silences the whole device. Lookup
-tables live in the `tbl` Data (filled on the first sample) instead.
+The code also keeps a few conventions that make it easy to check: every local is declared once at top level,
+no user function calls another or returns multiple values, and lookup tables live in the `tbl` Data (filled on
+the first sample).
