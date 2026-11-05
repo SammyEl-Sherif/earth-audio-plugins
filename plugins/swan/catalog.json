@@ -1,0 +1,17 @@
+{
+  "code": "AA-005",
+  "name": "SWAN",
+  "category": "Chord instrument",
+  "blurb": "Play chord progressions from your computer keyboard, and hear every note glide into the next chord.",
+  "longDescription": "SWAN turns letter keys into roots and number keys into chord types, then voices each change so the notes move as little as possible. Every voice glides into its new note, so progressions melt into each other: deep house pads, tech house stabs, ambient swells.",
+  "highlights": [
+    "Chords from your computer keyboard",
+    "Automatic voice leading",
+    "Every note glides"
+  ],
+  "accent": "#ab7aff",
+  "surface": "#1c1824",
+  "initialAccess": [
+    "admin"
+  ]
+}
