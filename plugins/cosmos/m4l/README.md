@@ -56,6 +56,13 @@ gen~'s type pass never types a user function nested inside `poke()`, so code gen
 `gen2.dsp.Model:1455: assertion failed` and the whole device goes silent. That was the cause of the first
 "no audio" bug.
 
-The code also keeps a few conventions that make it easy to check: every local is declared once at top level,
-no user function calls another or returns multiple values, and lookup tables live in the `tbl` Data (filled on
-the first sample).
+Three more gen~ rules, each of which caused silence or a dead feature in Max even though the code looked fine:
+
+- Give every `Param` an explicit `min` and `max`. gen~ defaults a missing range to 0..1 and clamps to it, which
+  broke the looper buttons (counters past 1) and Live sync (tempo and beat position).
+- Keep integer literals below 2^31. gen~ emits them as C `int`, so `4294967296` became 0.
+- Don't pre-declare locals with a constant (`ticked = 0;` at the top, then set inside blocks). gen~'s constant
+  folding then treated `if (ticked)` as always false, and no grains ever spawned.
+
+The code also keeps a few conventions: no user function calls another or returns multiple values, and lookup
+tables live in the `tbl` Data (filled on the first sample).
