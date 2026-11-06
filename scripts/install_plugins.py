@@ -91,18 +91,24 @@ def installed_product_names() -> list[str]:
 
 
 def find_bundles(build_dir: Path, only: Optional[set[str]] = None) -> list[Path]:
-    """Built .vst3 bundles, one per plugin, preferring Release."""
+    """Built .vst3 bundles, one per plugin, preferring Release, then the newest build. A build dir that was
+    configured both with and without AA_LOCAL_BUILD holds `X.vst3` and `X Local.vst3`: only the newest goes in."""
     found: dict[str, list[Path]] = {}
     for bundle in build_dir.glob("plugins/*/*_artefacts/*/VST3/*.vst3"):
         if bundle.is_dir():
-            found.setdefault(bundle.name, []).append(bundle)
+            found.setdefault(bundle_product(bundle.name), []).append(bundle)
     result = []
-    for name in sorted(found):
-        if only and bundle_product(name).lower() not in only:
+    for product in sorted(found):
+        if only and product not in only:
             continue
-        candidates = sorted(found[name], key=lambda p: (p.parts[-3] != "Release", str(p)))
+        candidates = sorted(found[product], key=lambda p: (p.parts[-3] != "Release", -bundle_mtime(p), str(p)))
         result.append(candidates[0])
-    return result
+    return sorted(result, key=lambda p: p.name)
+
+
+def bundle_mtime(bundle: Path) -> float:
+    """When the bundle was last built (its newest file)."""
+    return max((f.stat().st_mtime for f in bundle.rglob("*") if f.is_file()), default=bundle.stat().st_mtime)
 
 
 def bundle_vst3_stem(bundle_name: str) -> str:

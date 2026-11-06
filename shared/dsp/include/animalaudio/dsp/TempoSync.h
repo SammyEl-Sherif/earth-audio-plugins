@@ -91,6 +91,7 @@ inline double samplesPerCycle(double bpm, double sampleRate, Division d) noexcep
 struct TransportInfo
 {
     bool playing = false;
+    bool recording = false;
     bool hasBpm = false;
     double bpm = 120.0;
     bool hasPpq = false;

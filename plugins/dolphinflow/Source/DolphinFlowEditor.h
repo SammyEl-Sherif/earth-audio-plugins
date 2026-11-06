@@ -65,6 +65,7 @@ public:
     animalaudio::ui::ChoicePillRow& getModePills() noexcept { return *modePills; }
     animalaudio::ui::ChoicePillRow& getVoicePills() noexcept { return *voicePills; }
     juce::Button& getLatchButton() noexcept { return latchButton; }
+    juce::Button& getMpeButton() noexcept { return mpeButton; }
     juce::Button& getOctaveDownButton() noexcept { return octaveDown; }
     juce::Button& getOctaveUpButton() noexcept { return octaveUp; }
     RootKey& getRootKey(int pitchClass) noexcept { return *rootKeys[static_cast<std::size_t>(pitchClass)]; }
@@ -114,9 +115,11 @@ private:
     std::unique_ptr<animalaudio::ui::ChoicePillRow> modePills;
     std::unique_ptr<animalaudio::ui::ChoicePillRow> voicePills;
     animalaudio::ui::PillButton latchButton;
+    animalaudio::ui::PillButton mpeButton;
     animalaudio::ui::PillButton octaveDown;
     animalaudio::ui::PillButton octaveUp;
     std::unique_ptr<juce::ButtonParameterAttachment> latchAttachment;
+    std::unique_ptr<juce::ButtonParameterAttachment> mpeAttachment;
     std::array<std::unique_ptr<RootKey>, 12> rootKeys;
     animalaudio::ui::PillButton keysTab;
     animalaudio::ui::PillButton arrangeTab;

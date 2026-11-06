@@ -122,6 +122,7 @@ void DolphinFlowEngine::setSettings(const EngineSettings& next) noexcept
     // A played voicing (shape -1) keeps its own notes; only named chords are re-voiced.
     const bool revoice =
         hasChord && gate && shape >= 0 && (clamped.voices != settings.voices || clamped.centre != settings.centre);
+    registerShift += clamped.centre - settings.centre;
     settings = clamped;
     envelope = envelopeFor(settings.mode);
     const double glideSamples = settings.glideMs * 0.001 * sampleRate;
@@ -135,7 +136,17 @@ void DolphinFlowEngine::setSettings(const EngineSettings& next) noexcept
     reverb.setDamping(0.45f);
 
     if (revoice)
-        applyVoicing(VoiceLeader::lead(voicing, root, shape, settings.voices, settings.centre), true);
+        applyVoicing(VoiceLeader::lead(leadFrom(), root, shape, settings.voices, settings.centre), true);
+}
+
+Voicing DolphinFlowEngine::leadFrom() noexcept
+{
+    // An octave change moves the whole chord by that octave, rather than leading to the nearest notes in range.
+    Voicing from = voicing;
+    for (int v = 0; v < from.count; ++v)
+        from.notes[v] = std::clamp(from.notes[v] + registerShift, 0, 127);
+    registerShift = 0;
+    return from;
 }
 
 void DolphinFlowEngine::playChord(int rootPitchClass, int shapeIndex) noexcept
@@ -145,7 +156,7 @@ void DolphinFlowEngine::playChord(int rootPitchClass, int shapeIndex) noexcept
 
     // Glide only from notes still sounding; after silence the chord simply starts on its notes.
     const bool sounding = hasChord && stage != Stage::Idle;
-    const Voicing next = sounding ? VoiceLeader::lead(voicing, root, shape, settings.voices, settings.centre)
+    const Voicing next = sounding ? VoiceLeader::lead(leadFrom(), root, shape, settings.voices, settings.centre)
                                   : VoiceLeader::initial(root, shape, settings.voices, settings.centre);
     applyVoicing(next, sounding);
     gateOn();
@@ -243,6 +254,7 @@ void DolphinFlowEngine::applyVoicing(const Voicing& next, bool glide) noexcept
         }
     }
     voicing = next;
+    registerShift = 0;
     voiceGain = 0.32f / std::sqrt(static_cast<float>(voicing.count));
 }
 

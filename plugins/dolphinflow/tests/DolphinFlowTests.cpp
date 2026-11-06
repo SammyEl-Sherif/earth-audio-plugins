@@ -13,6 +13,7 @@
 #include <catch2/generators/catch_generators_range.hpp>
 
 #include <algorithm>
+#include <map>
 #include <cmath>
 #include <cstdlib>
 #include <vector>
@@ -418,6 +419,43 @@ TEST_CASE("dolphinflow: MIDI notes pick the root, CHORD picks the quality")
     REQUIRE_FALSE(engine.isGateOn());
 }
 
+TEST_CASE("dolphinflow: the played root's octave moves the register, like Live's Z / X")
+{
+    // Live's Z / X shift its computer keyboard's notes an octave, with the plugin window closed: the chord follows.
+    Harness h(kRate, 512);
+    const auto& engine = h.processor.getEngine();
+    const auto mean = [&engine]
+    {
+        const auto& v = engine.getVoicing();
+        float sum = 0.0f;
+        for (int i = 0; i < v.count; ++i)
+            sum += static_cast<float>(v.notes[i]);
+        return sum / static_cast<float>(v.count);
+    };
+    h.midi.addEvent(juce::MidiMessage::noteOn(1, 60, 0.8f), 0); // C3, Live's home octave
+    processBlock(h);
+    const float home = mean();
+    REQUIRE(std::abs(home - 60.0f) < 6.0f);
+
+    h.midi.addEvent(juce::MidiMessage::noteOff(1, 60), 0);
+    h.midi.addEvent(juce::MidiMessage::noteOn(1, 72, 0.8f), 0); // X: same key, an octave up
+    processBlock(h);
+    REQUIRE(engine.getRoot() == C);
+    REQUIRE(mean() == Catch::Approx(home + 12.0f).margin(2.0));
+
+    h.midi.addEvent(juce::MidiMessage::noteOff(1, 72), 0);
+    h.midi.addEvent(juce::MidiMessage::noteOn(1, 48, 0.8f), 0); // Z twice from there
+    processBlock(h);
+    REQUIRE(mean() == Catch::Approx(home - 12.0f).margin(2.0));
+
+    // OCTAVE adds on top; together they stop at three octaves either way.
+    h.setParam(dolphinflow::ids::octave, -2.0f);
+    h.midi.addEvent(juce::MidiMessage::noteOff(1, 48), 0);
+    h.midi.addEvent(juce::MidiMessage::noteOn(1, 24, 0.8f), 0);
+    processBlock(h);
+    REQUIRE(mean() == Catch::Approx(home - 36.0f).margin(2.0));
+}
+
 TEST_CASE("dolphinflow: changing CHORD re-voices the held chord; LATCH holds after release")
 {
     Harness h(kRate, 512);
@@ -572,6 +610,237 @@ TEST_CASE("dolphinflow: a clip recorded from MIDI out plays back the same voicin
     processAndCollect(player, 64);
     REQUIRE(voicedNotes(player.processor) == next);
     REQUIRE(engine.isHeld());
+}
+
+namespace
+{
+struct RawEvent
+{
+    juce::MidiMessage message;
+    int position;
+};
+
+std::vector<RawEvent> processRaw(Harness& h, int samples = 512)
+{
+    juce::AudioBuffer<float> buffer(2, samples);
+    buffer.clear();
+    h.processor.processBlock(buffer, h.midi);
+    std::vector<RawEvent> out;
+    for (const auto metadata : h.midi)
+        out.push_back({metadata.getMessage(), metadata.samplePosition});
+    h.midi.clear();
+    return out;
+}
+} // namespace
+
+TEST_CASE("dolphinflow: MPE out puts each note on its own channel and sends glides as pitch bends")
+{
+    using dolphinflow::NoteOut;
+    Harness h(kRate, 512);
+    h.setParam(dolphinflow::ids::glide, 300.0f);
+    h.processor.pressRoot(dolphinflow::DolphinFlowProcessor::kKeySourceBase + C, C);
+    std::map<int, int> channelOf; // sounding note -> member channel
+    for (const auto& e : processRaw(h))
+        if (e.message.isNoteOn())
+        {
+            REQUIRE(e.message.getChannel() >= NoteOut::kFirstMemberChannel);
+            for (const auto& [note, channel] : channelOf)
+                REQUIRE(channel != e.message.getChannel());
+            channelOf[e.message.getNoteNumber()] = e.message.getChannel();
+        }
+    REQUIRE(channelOf.size() == voicedNotes(h.processor).size());
+
+    // C to A: the voices that move end their notes and start the new ones on fresh channels, each with a bend
+    // from where it slides from (G up to A is -2 semitones) that runs to 0 with the glide. Common tones never bend.
+    const auto before = voicedNotes(h.processor);
+    h.processor.pressRoot(dolphinflow::DolphinFlowProcessor::kKeySourceBase + A, A);
+    const auto change = processRaw(h);
+    std::map<int, std::vector<int>> bends; // channel -> every bend sent on it
+    std::map<int, int> arrivedOn;          // channel -> the note started on it
+    for (std::size_t i = 0; i < change.size(); ++i)
+        if (change[i].message.isNoteOn())
+        {
+            const int ch = change[i].message.getChannel();
+            REQUIRE(std::find(before.begin(), before.end(), change[i].message.getNoteNumber()) == before.end());
+            REQUIRE(i > 0);
+            REQUIRE(change[i - 1].message.isPitchWheel()); // the bend comes before the note
+            REQUIRE(change[i - 1].message.getChannel() == ch);
+            REQUIRE(change[i - 1].message.getPitchWheelValue() != 8192);
+            arrivedOn[ch] = change[i].message.getNoteNumber();
+        }
+    REQUIRE_FALSE(arrivedOn.empty());
+    std::vector<RawEvent> all = change;
+    for (int block = 0; block < 40; ++block) // ~0.43 s, past the 300 ms glide
+        for (const auto& e : processRaw(h))
+        {
+            REQUIRE_FALSE(e.message.isNoteOnOrOff());
+            all.push_back(e);
+        }
+    for (const auto& e : all)
+        if (e.message.isPitchWheel())
+        {
+            REQUIRE(arrivedOn.count(e.message.getChannel()) == 1);
+            bends[e.message.getChannel()].push_back(e.message.getPitchWheelValue());
+        }
+    bool sawG = false;
+    for (const auto& [ch, curve] : bends)
+    {
+        REQUIRE(curve.size() > 20); // a smooth curve, not a jump
+        const bool rising = curve.front() < 8192;
+        REQUIRE((rising ? std::is_sorted(curve.begin(), curve.end()) : std::is_sorted(curve.rbegin(), curve.rend())));
+        REQUIRE(curve.back() == 8192);
+        if (dolphinflow::dsp::pitchClassOf(arrivedOn[ch]) == A &&
+            std::find(before.begin(), before.end(), arrivedOn[ch] - 2) != before.end())
+        {
+            sawG = true;
+            REQUIRE(curve.front() == NoteOut::bendFor(-2.0f));
+        }
+    }
+    REQUIRE(sawG);
+}
+
+#if JUCE_MAC
+TEST_CASE("dolphinflow: the virtual MPE port carries the notes and glide bends")
+{
+    struct Listener : juce::MidiInputCallback
+    {
+        std::atomic<int> notesOn{0}, bends{0};
+        void handleIncomingMidiMessage(juce::MidiInput*, const juce::MidiMessage& m) override
+        {
+            if (m.isNoteOn())
+                ++notesOn;
+            if (m.isPitchWheel())
+                ++bends;
+        }
+    } listener;
+
+    Harness h(kRate, 512);
+    // Its own name: a running Live may already have a Dolphin Flow making "Animal Audio - Dolphin Flow".
+    h.processor.openMpePort("Animal Audio - Dolphin Flow Test " +
+                            juce::String(juce::Random::getSystemRandom().nextInt()));
+    const auto name = h.processor.getMpePortName();
+    REQUIRE(name.startsWith("Animal Audio - Dolphin Flow"));
+    std::unique_ptr<juce::MidiInput> input;
+    for (int attempt = 0; attempt < 50 && input == nullptr; ++attempt)
+    {
+        for (const auto& device : juce::MidiInput::getAvailableDevices())
+            if (device.name == name)
+                input = juce::MidiInput::openDevice(device.identifier, &listener);
+        if (input == nullptr) // the device list updates on the message thread
+            juce::MessageManager::getInstance()->runDispatchLoopUntil(20);
+    }
+    REQUIRE(input != nullptr);
+    input->start();
+    juce::MessageManager::getInstance()->runDispatchLoopUntil(200); // CoreMIDI connects the port asynchronously
+
+    h.setParam(dolphinflow::ids::glide, 300.0f);
+    h.processor.pressRoot(dolphinflow::DolphinFlowProcessor::kKeySourceBase + C, C);
+    processRaw(h);
+    h.processor.pressRoot(dolphinflow::DolphinFlowProcessor::kKeySourceBase + A, A);
+    for (int block = 0; block < 10; ++block)
+        processRaw(h);
+    for (int wait = 0; wait < 200 && listener.bends < 10; ++wait)
+        juce::Thread::sleep(10);
+    input->stop();
+    REQUIRE(listener.notesOn >= static_cast<int>(voicedNotes(h.processor).size()));
+    REQUIRE(listener.bends >= 10);
+}
+#endif
+
+TEST_CASE("dolphinflow: its own MPE notes coming back in are ignored, so roots still glide")
+{
+    Harness h(kRate, 512);
+    h.midi.addEvent(juce::MidiMessage::noteOn(1, 48, 0.8f), 0); // C root from a keyboard
+    std::vector<RawEvent> echo;
+    for (const auto& e : processRaw(h))
+        if (e.message.isNoteOn())
+            echo.push_back(e);
+    REQUIRE(echo.size() >= 3);
+    const auto cChord = voicedNotes(h.processor);
+
+    // The port's notes arrive back a block later, as on a track armed on All Ins: the chord must not change.
+    for (const auto& e : echo)
+        h.midi.addEvent(e.message, 0);
+    processRaw(h);
+    REQUIRE(voicedNotes(h.processor) == cChord);
+    REQUIRE(h.processor.getEngine().getShape() == kMaj);
+
+    // The next root is a chord change (a glide), not a note added to the echo.
+    h.midi.addEvent(juce::MidiMessage::noteOff(1, 48), 0);
+    h.midi.addEvent(juce::MidiMessage::noteOn(1, 57, 0.8f), 0);
+    processRaw(h);
+    REQUIRE(h.processor.getEngine().getRoot() == A);
+    REQUIRE(h.processor.getEngine().getVoicing().count == 4);
+
+    // A real MPE keyboard on member channels still plays a voicing.
+    Harness k(kRate, 512);
+    for (int i = 0; i < 3; ++i)
+        k.midi.addEvent(juce::MidiMessage::noteOn(2 + i, 60 + 4 * i, 0.8f), 0);
+    processRaw(k);
+    REQUIRE(voicedNotes(k.processor) == std::vector<int>{60, 64, 68});
+}
+
+TEST_CASE("dolphinflow: with MPE off the notes are plain channel 1 notes")
+{
+    Harness h(kRate, 512);
+    h.setParam(dolphinflow::ids::mpe, 0.0f);
+    h.processor.pressRoot(dolphinflow::DolphinFlowProcessor::kKeySourceBase + C, C);
+    processRaw(h);
+    h.processor.pressRoot(dolphinflow::DolphinFlowProcessor::kKeySourceBase + A, A);
+    for (int block = 0; block < 20; ++block)
+        for (const auto& e : processRaw(h))
+        {
+            REQUIRE_FALSE(e.message.isPitchWheel());
+            if (e.message.isNoteOnOrOff())
+                REQUIRE(e.message.getChannel() == 1);
+        }
+}
+
+TEST_CASE("dolphinflow: starting play or record sends a latched chord again, so the recording holds it")
+{
+    Harness h(kRate, 512);
+    h.setParam(dolphinflow::ids::latch, 1.0f);
+    h.processor.pressRoot(dolphinflow::DolphinFlowProcessor::kKeySourceBase + D, D);
+    processAndCollect(h);
+    h.processor.releaseAllKeys();
+    processAndCollect(h);
+    const auto latched = voicedNotes(h.processor);
+    REQUIRE(h.processor.getEngine().isHeld());
+
+    juce::AudioPlayHead::PositionInfo position;
+    position.setIsPlaying(true);
+    position.setPpqPosition(0.0);
+    h.playHead.position = position;
+    const auto started = processAndCollect(h);
+    REQUIRE(notesWhere(started, false) == latched);
+    REQUIRE(notesWhere(started, true) == latched);
+    for (const auto& e : started)
+        REQUIRE(e.position == 0);
+    REQUIRE(processAndCollect(h).empty()); // only once
+
+    position.setIsRecording(true);
+    h.playHead.position = position;
+    REQUIRE(notesWhere(processAndCollect(h), true) == latched);
+}
+
+TEST_CASE("dolphinflow: the loop starting with the host sends each chord once, no empty notes")
+{
+    Harness h(kRate, 512);
+    h.setParam(dolphinflow::ids::loop, 1.0f);
+    for (int block = 0; block < 4; ++block) // free-running on the first square
+        processBlock(h);
+    juce::AudioPlayHead::PositionInfo position;
+    position.setIsPlaying(true);
+    position.setBpm(120.0);
+    position.setPpqPosition(8.0); // the third square
+    h.playHead.position = position;
+    const auto started = processAndCollect(h);
+    REQUIRE(h.processor.getPlayingSlot() == 2);
+    REQUIRE(notesWhere(started, true) == voicedNotes(h.processor));
+    for (auto on = started.begin(); on != started.end(); ++on) // a note started is not ended: no empty notes
+        if (on->on)
+            REQUIRE(
+                std::none_of(on + 1, started.end(), [&](const MidiEvent& e) { return !e.on && e.note == on->note; }));
 }
 
 TEST_CASE("dolphinflow: two overlapping MIDI roots stay roots")

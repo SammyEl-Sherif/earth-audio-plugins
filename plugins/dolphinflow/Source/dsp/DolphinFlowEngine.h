@@ -109,6 +109,8 @@ private:
     };
 
     void applyVoicing(const Voicing& next, bool glide) noexcept;
+    /** The voicing the next chord leads from: the current one moved by any register shift since it was played. */
+    Voicing leadFrom() noexcept;
     void gateOn() noexcept;
     void strike() noexcept;
     void updateControl() noexcept;
@@ -121,6 +123,7 @@ private:
     Envelope envelope{};
     Voice voices[kMaxVoices];
     Voicing voicing;
+    int registerShift = 0; // semitones the centre moved since `voicing` was set; the next lead starts that far over
     int root = 0;
     int shape = 0;
     bool gate = false;

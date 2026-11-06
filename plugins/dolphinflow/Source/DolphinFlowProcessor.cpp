@@ -57,6 +57,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
     layout.add(percentParameter(ids::level, "Level", 0.7f));
     layout.add(std::make_unique<juce::AudioParameterBool>(ids::latch, "Latch", false));
     layout.add(std::make_unique<juce::AudioParameterBool>(ids::loop, "Loop", false));
+    layout.add(std::make_unique<juce::AudioParameterBool>(ids::mpe, "MPE Out", true));
     return layout;
 }
 } // namespace
@@ -77,6 +78,7 @@ DolphinFlowProcessor::DolphinFlowProcessor()
     levelParam = apvts.getRawParameterValue(ids::level.getParamID());
     latchParam = apvts.getRawParameterValue(ids::latch.getParamID());
     loopParam = apvts.getRawParameterValue(ids::loop.getParamID());
+    mpeParam = apvts.getRawParameterValue(ids::mpe.getParamID());
     for (int i = 0; i < dsp::kNumSlots; ++i)
         slotState[static_cast<std::size_t>(i)].store(defaultSlot(i).pack());
     loadSlotsFromState();
@@ -104,7 +106,8 @@ void DolphinFlowProcessor::pushSettings() noexcept
     s.mode = static_cast<dsp::Mode>(std::clamp(juce::roundToInt(modeParam->load()), 0, dsp::kNumModes - 1));
     s.voices =
         dsp::kMinVoices + std::clamp(juce::roundToInt(voicesParam->load()), 0, dsp::kMaxVoices - dsp::kMinVoices);
-    s.centre = dsp::kDefaultCentre + 12 * juce::roundToInt(octaveParam->load());
+    s.centre = dsp::kDefaultCentre + 12 * std::clamp(juce::roundToInt(octaveParam->load()) + playedOctave,
+                                                     -kMaxTotalOctaves, kMaxTotalOctaves);
     s.glideMs = glideParam->load();
     s.curve = curveParam->load();
     s.tone = toneParam->load();
@@ -120,7 +123,11 @@ void DolphinFlowProcessor::prepareToPlay(double sampleRate, int)
 {
     heldCount = 0;
     intent = {};
-    outCount = 0;
+    playedOctave = 0;
+    noteOut.reset();
+    sent.fill({});
+    lastPlaying = false;
+    lastRecording = false;
     sequencing = false;
     sequenceSlot = -1;
     playingSlot.store(-1);
@@ -129,6 +136,8 @@ void DolphinFlowProcessor::prepareToPlay(double sampleRate, int)
     lastLatch = latchParam->load() > 0.5f;
     pushSettings();
     engine.prepare(sampleRate);
+    if (wrapperType != wrapperType_Undefined)
+        mpePort.open(); // a host loaded us; tests open it themselves (openMpePort), so they make no stray ports
 }
 
 void DolphinFlowProcessor::press(int source, int root, int note, int velocity) noexcept
@@ -171,6 +180,7 @@ DolphinFlowProcessor::Intent DolphinFlowProcessor::wantedIntent() const noexcept
     next.kind = Intent::Kind::Chord;
     if (newest.note < 0)
         return next;
+    next.octave = newest.note / 12 - kReferenceOctave;
 
     // Three or more MIDI notes at once are a voiced chord (e.g. a clip recorded from our MIDI out): play it as is.
     // Two stay roots, so overlapping legato roots on a keyboard do not turn into dyads.
@@ -202,8 +212,17 @@ void DolphinFlowProcessor::resolve() noexcept
             engine.release();
         break;
     case Intent::Kind::Chord:
+    {
+        // The octave of the played root moves the register (Live's Z / X on its computer keyboard, or simply
+        // playing higher), on top of OCTAVE. Editor keys play at OCTAVE alone.
+        if (intent.octave != playedOctave)
+        {
+            playedOctave = intent.octave;
+            pushSettings();
+        }
         engine.playChord(intent.root, intent.shape);
         break;
+    }
     case Intent::Kind::Voicing:
         engine.playVoicing(intent.voicing);
         break;
@@ -212,44 +231,49 @@ void DolphinFlowProcessor::resolve() noexcept
 
 void DolphinFlowProcessor::syncMidiOut(int samplePosition) noexcept
 {
-    int wanted[dsp::kMaxVoices] = {};
-    int wantedCount = 0;
-    if (engine.isHeld())
-    {
-        const auto& voicing = engine.getVoicing();
-        for (int v = 0; v < voicing.count; ++v)
-            if (std::find(wanted, wanted + wantedCount, voicing.notes[v]) == wanted + wantedCount)
-                wanted[wantedCount++] = voicing.notes[v];
-    }
+    noteOut.sync(engine, lastVelocity, midiOut, samplePosition);
+}
 
-    // Common tones keep sounding across a chord change, so a recorded clip shows them as one long note.
-    int kept = 0;
-    for (int i = 0; i < outCount; ++i)
+bool DolphinFlowProcessor::isOwnEcho(const juce::MidiMessage& message) noexcept
+{
+    // Our MPE port feeds every armed track listening to All Ins, this one included. A note-on matching one we sent
+    // in the last second is that echo: it would turn the next root into an added note instead of a glide.
+    if (message.getChannel() < NoteOut::kFirstMemberChannel)
+        return false; // plain notes and keyboards on channel 1 are always played
+    const auto window = static_cast<juce::int64>(getSampleRate());
+    for (auto& s : sent)
+        if (s.note == message.getNoteNumber() && s.channel == message.getChannel() && sampleClock - s.at <= window)
+        {
+            s.note = -1; // each sent note echoes once
+            return true;
+        }
+    return false;
+}
+
+void DolphinFlowProcessor::rememberSent(const juce::MidiBuffer& buffer) noexcept
+{
+    for (const auto metadata : buffer)
     {
-        const int note = outNotes[static_cast<std::size_t>(i)];
-        if (std::find(wanted, wanted + wantedCount, note) == wanted + wantedCount)
-            midiOut.addEvent(juce::MidiMessage::noteOff(kMidiChannel, note), samplePosition);
-        else
-            outNotes[static_cast<std::size_t>(kept++)] = note;
-    }
-    outCount = kept;
-    for (int i = 0; i < wantedCount; ++i)
-    {
-        const auto begin = outNotes.begin();
-        if (std::find(begin, begin + outCount, wanted[i]) != begin + outCount)
+        const auto message = metadata.getMessage();
+        if (!message.isNoteOn() || message.getChannel() < NoteOut::kFirstMemberChannel)
             continue;
-        midiOut.addEvent(juce::MidiMessage::noteOn(kMidiChannel, wanted[i], static_cast<juce::uint8>(lastVelocity)),
-                         samplePosition);
-        outNotes[static_cast<std::size_t>(outCount++)] = wanted[i];
+        sent[static_cast<std::size_t>(sentHead)] = {message.getChannel(), message.getNoteNumber(),
+                                                    sampleClock + metadata.samplePosition};
+        sentHead = (sentHead + 1) % kMaxSent;
     }
 }
 
 void DolphinFlowProcessor::handleMidiMessage(const juce::MidiMessage& message) noexcept
 {
+    // A MIDI source is its channel and note, so an MPE keyboard's notes stay apart.
+    const int source = (message.getChannel() - 1) * 128 + message.getNoteNumber();
     if (message.isNoteOn())
-        press(message.getNoteNumber(), message.getNoteNumber() % 12, message.getNoteNumber(), message.getVelocity());
+    {
+        if (!isOwnEcho(message))
+            press(source, message.getNoteNumber() % 12, message.getNoteNumber(), message.getVelocity());
+    }
     else if (message.isNoteOff())
-        release(message.getNoteNumber());
+        release(source); // an echo's note-off finds nothing held
     else if (message.isAllSoundOff())
     {
         heldCount = 0;
@@ -318,6 +342,7 @@ void DolphinFlowProcessor::stepSequencer(const dsp::Slots& slots, double& sample
 void DolphinFlowProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
     juce::ScopedNoDenormals noDenormals;
+    const double blockStartMs = juce::Time::getMillisecondCounterHiRes();
     midiOut.clear();
     const int numSamples = buffer.getNumSamples();
     const int channels = std::min(buffer.getNumChannels(), dsp::DolphinFlowEngine::kMaxChannels);
@@ -357,6 +382,9 @@ void DolphinFlowProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::
     }
     if (sequencing && hostClock)
         sequenceBeats = transport.ppq;
+    double toBoundary = 0.0;
+    if (sequencing)
+        stepSequencer(slots, toBoundary, beatsPerSample); // the square at the block start, before any note goes out
 
     drainUiEvents();
     if (!sequencing)
@@ -374,6 +402,14 @@ void DolphinFlowProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::
     if (!sequencing && lastLatch && !latch && heldCount == 0)
         engine.release();
     lastLatch = latch;
+
+    // Starting play or record sends the sounding notes again, so the clip being recorded holds them from its start.
+    const bool started = (transport.playing && !lastPlaying) || (transport.recording && !lastRecording);
+    lastPlaying = transport.playing;
+    lastRecording = transport.recording;
+    if (started)
+        noteOut.releaseAll(midiOut, 0);
+    noteOut.setMpe(mpeParam->load() > 0.5f, midiOut, 0);
     syncMidiOut(0);
 
     float* pointers[dsp::DolphinFlowEngine::kMaxChannels] = {};
@@ -399,11 +435,14 @@ void DolphinFlowProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::
         int next = numSamples;
         if (sequencing)
         {
-            double toBoundary = 0.0;
             stepSequencer(slots, toBoundary, beatsPerSample);
             syncMidiOut(done);
             next = static_cast<int>(std::min<double>(next, done + toBoundary));
         }
+        // While a glide runs, its MPE pitch bends go out every few samples, read from the engine as it slides.
+        noteOut.updateBends(engine, midiOut, done);
+        if (noteOut.isGliding(engine))
+            next = std::min(next, done + NoteOut::kBendInterval);
         if (it != midi.cend())
             next = std::min(next, std::clamp((*it).samplePosition, 0, numSamples));
         next = std::max(next, done + 1);
@@ -416,6 +455,12 @@ void DolphinFlowProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::
     }
     applyMidiAt(numSamples);
     playingSlot.store(sequencing ? sequenceSlot : -1, std::memory_order_relaxed);
+    if (noteOut.isMpe())
+    {
+        mpePort.queue(midiOut, blockStartMs, getSampleRate()); // MPE only: plain channel 1 notes have no glides
+        rememberSent(midiOut);
+    }
+    sampleClock += numSamples;
     midi.swapWith(midiOut);
 }
 
@@ -518,9 +563,10 @@ bool DolphinFlowProcessor::writeMidiClip(const juce::File& file) const
     track.addEvent(juce::MidiMessage::timeSignatureMetaEvent(4, 4), 0.0);
     for (const auto& note : dsp::buildClip(slots, voices, centre))
     {
-        track.addEvent(juce::MidiMessage::noteOn(kMidiChannel, note.note, static_cast<juce::uint8>(kKeyVelocity)),
-                       ticks(note.start));
-        track.addEvent(juce::MidiMessage::noteOff(kMidiChannel, note.note), ticks(note.end));
+        track.addEvent(
+            juce::MidiMessage::noteOn(NoteOut::kPlainChannel, note.note, static_cast<juce::uint8>(kKeyVelocity)),
+            ticks(note.start));
+        track.addEvent(juce::MidiMessage::noteOff(NoteOut::kPlainChannel, note.note), ticks(note.end));
     }
     track.addEvent(juce::MidiMessage::endOfTrack(), ticks(total));
     track.sort();

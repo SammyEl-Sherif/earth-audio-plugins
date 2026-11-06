@@ -16,6 +16,7 @@ inline dsp::TransportInfo readTransport(juce::AudioPlayHead* playHead)
     if (const auto position = playHead->getPosition())
     {
         transport.playing = position->getIsPlaying();
+        transport.recording = position->getIsRecording();
         if (const auto bpm = position->getBpm())
         {
             transport.hasBpm = true;

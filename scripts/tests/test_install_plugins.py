@@ -68,6 +68,13 @@ class InstallPluginsTest(unittest.TestCase):
         self.assertIn(release, found)
         self.assertEqual([b.name for b in ip.find_bundles(self.build, {"wobble"})], ["Wobble.vst3"])
 
+    def test_a_stale_release_named_build_is_not_installed_beside_the_local_one(self):
+        old = make_bundle(self.build, "Duck", "Release")
+        local = make_bundle(self.build, "Duck Local", "Release")
+        import os
+        os.utime(old / "Contents" / "x86_64-linux" / "Duck", (1, 1))
+        self.assertEqual(ip.find_bundles(self.build), [local])
+
     def test_install_copies_all_plugins_and_prints_stamp(self):
         make_bundle(self.build, "Duck", sha="1111111")
         make_bundle(self.build, "Wobble", sha="1111111")
