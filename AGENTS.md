@@ -101,7 +101,9 @@ plugins/dolphinflow/  keyboard chord instrument (own processor and editor; the s
   Source/             DolphinFlowProcessor (params, held-root stack, MIDI + editor-key events via a lock-free FIFO,
                       MIDI out of the played notes), NoteOut (MIDI out: MPE channel per note, glides as pitch
                       bends, re-sent on host play/record start), MpePort (virtual "Animal Audio - Dolphin Flow" MIDI port mirroring MIDI out,
-                      since Live drops VST3 pitch bend output; FIFO + sender thread; opened only when a host loads the plugin, tests call openMpePort), DolphinFlowEditor (computer keys, RootKey piano, glide ribbons)
+                      since Live drops VST3 pitch bend output; FIFO + sender thread; opened only when a host loads the plugin, tests call openMpePort;
+                      port note-ons carry MpePort::portVelocity so EchoGuard, a process-wide lock-free ring, ignores them coming
+                      back in on any channel: Live gives a non-MPE plugin all input on channel 1, and an All Ins echo would feed itself), DolphinFlowEditor (computer keys, RootKey piano, glide ribbons)
   Source/dsp/         Chords (10 qualities, identifyChord), VoiceLeader (least-movement voicing), DolphinFlowEngine
                       (paraphonic glide synth), Progression (8 arrangement slots, loop maths, settled voicing, clip notes)
   Source/ui/          ArrangeView (SlotCell squares, LOOP, ClipButton drag/save .mid),
