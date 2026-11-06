@@ -749,6 +749,8 @@ TEST_CASE("dolphinflow: the virtual MPE port carries the notes and glide bends")
 
 TEST_CASE("dolphinflow: its own MPE notes coming back in are ignored, so roots still glide")
 {
+    // Live hands a plugin that is not MPE enabled every note on channel 1; an MPE enabled one keeps the channels.
+    const bool collapsed = GENERATE(true, false);
     Harness h(kRate, 512);
     h.midi.addEvent(juce::MidiMessage::noteOn(1, 48, 0.8f), 0); // C root from a keyboard
     std::vector<RawEvent> echo;
@@ -760,7 +762,10 @@ TEST_CASE("dolphinflow: its own MPE notes coming back in are ignored, so roots s
 
     // The port's notes arrive back a block later, as on a track armed on All Ins: the chord must not change.
     for (const auto& e : echo)
-        h.midi.addEvent(e.message, 0);
+        h.midi.addEvent(juce::MidiMessage::noteOn(collapsed ? 1 : e.message.getChannel(), e.message.getNoteNumber(),
+                                                  static_cast<juce::uint8>(dolphinflow::MpePort::portVelocity(
+                                                      e.message.getVelocity()))), // as the port sends it
+                        0);
     processRaw(h);
     REQUIRE(voicedNotes(h.processor) == cChord);
     REQUIRE(h.processor.getEngine().getShape() == kMaj);
@@ -1214,4 +1219,123 @@ TEST_CASE("dolphinflow: arrange view renders headlessly")
 TEST_CASE("dolphinflow: build stamp is baked in")
 {
     REQUIRE(animalaudio::core::buildStampShort().isNotEmpty());
+}
+
+TEST_CASE("dolphinflow: spamming keys and buttons keeps the sound and MIDI out sane")
+{
+    Harness h(kRate, 128);
+    juce::Random rng(99);
+    std::map<std::pair<int, int>, int> active; // (channel, note) -> count
+    int worstActive = 0, badOffs = 0, doubleOns = 0;
+    float peak = 0.0f;
+    bool finite = true;
+    for (int block = 0; block < 20000; ++block)
+    {
+        const int r = rng.nextInt(10);
+        if (r == 0)
+            h.setParam(dolphinflow::ids::mpe, rng.nextBool() ? 1.0f : 0.0f);
+        if (r == 1)
+            h.setParam(dolphinflow::ids::loop, rng.nextBool() ? 1.0f : 0.0f);
+        if (r == 2)
+            h.setParam(dolphinflow::ids::latch, rng.nextBool() ? 1.0f : 0.0f);
+        if (r == 3)
+            h.setParam(dolphinflow::ids::mode, static_cast<float>(rng.nextInt(3)));
+        if (r == 4)
+            h.setParam(dolphinflow::ids::chord, static_cast<float>(rng.nextInt(10)));
+        if (r == 5)
+            h.setParam(dolphinflow::ids::voices, static_cast<float>(rng.nextInt(4)));
+        if (r == 6)
+            h.setParam(dolphinflow::ids::octave, static_cast<float>(rng.nextInt(5) - 2));
+        if (r == 7)
+            h.processor.pressRoot(dolphinflow::DolphinFlowProcessor::kKeySourceBase + rng.nextInt(12), rng.nextInt(12));
+        if (r == 8)
+            h.processor.releaseRoot(dolphinflow::DolphinFlowProcessor::kKeySourceBase + rng.nextInt(12));
+        if (r == 9)
+        {
+            const int note = 40 + rng.nextInt(40);
+            h.midi.addEvent(rng.nextBool() ? juce::MidiMessage::noteOn(1, note, 0.8f)
+                                           : juce::MidiMessage::noteOff(1, note),
+                            rng.nextInt(128));
+        }
+        juce::AudioBuffer<float> buffer(2, 128);
+        buffer.clear();
+        h.processor.processBlock(buffer, h.midi);
+        for (int c = 0; c < 2; ++c)
+            for (int i = 0; i < 128; ++i)
+            {
+                finite = finite && std::isfinite(buffer.getSample(c, i));
+                peak = std::max(peak, std::abs(buffer.getSample(c, i)));
+            }
+        std::vector<RawEvent> out;
+        for (const auto metadata : h.midi)
+            out.push_back({metadata.getMessage(), metadata.samplePosition});
+        h.midi.clear();
+        for (const auto& e : out)
+        {
+            const auto key = std::make_pair(e.message.getChannel(), e.message.getNoteNumber());
+            if (e.message.isNoteOn())
+            {
+                if (active[key] > 0)
+                    ++doubleOns;
+                ++active[key];
+            }
+            else if (e.message.isNoteOff())
+            {
+                if (active[key] == 0)
+                    ++badOffs;
+                else
+                    --active[key];
+            }
+        }
+        int total = 0;
+        for (const auto& [k, n] : active)
+            total += n;
+        worstActive = std::max(worstActive, total);
+    }
+    REQUIRE(finite);
+    REQUIRE(peak < 1.0f);
+    REQUIRE(worstActive <= dolphinflow::dsp::kMaxVoices); // never more notes out than voices
+    REQUIRE(badOffs == 0);
+    REQUIRE(doubleOns == 0);
+}
+
+TEST_CASE("dolphinflow: its own port notes echoing back on channel 1 never feed themselves")
+{
+    // Live hands a non-MPE plugin all its input on channel 1: our port's notes come back there, a few blocks late.
+    Harness h(kRate, 256);
+    juce::Random rng(5);
+    std::vector<std::vector<RawEvent>> pipe(3);
+    int lateEvents = 0;
+    for (int block = 0; block < 3000; ++block)
+    {
+        if (block < 1500 && rng.nextInt(3) == 0)
+        {
+            const int note = 48 + rng.nextInt(24);
+            h.midi.addEvent(juce::MidiMessage::noteOn(1, note, 0.8f), rng.nextInt(256));
+            h.midi.addEvent(juce::MidiMessage::noteOff(1, note), 255);
+        }
+        for (const auto& e : pipe[0])
+        {
+            auto m = e.message;
+            m.setChannel(1);
+            h.midi.addEvent(m, e.position);
+        }
+        pipe.erase(pipe.begin());
+        auto out = processRaw(h, 256);
+        std::vector<RawEvent> echo;
+        for (const auto& e : out)
+            if (e.message.isNoteOnOrOff())
+            {
+                auto m = e.message;
+                if (m.isNoteOn()) // as the port sends it
+                    m = juce::MidiMessage::noteOn(
+                        m.getChannel(), m.getNoteNumber(),
+                        static_cast<juce::uint8>(dolphinflow::MpePort::portVelocity(m.getVelocity())));
+                echo.push_back({m, e.position});
+            }
+        if (block >= 2000)
+            lateEvents += static_cast<int>(echo.size());
+        pipe.push_back(echo);
+    }
+    REQUIRE(lateEvents == 0); // once the player stops, nothing keeps feeding itself
 }
