@@ -99,7 +99,9 @@ plugins/cosmos/       granular looper (own processor and editor; the series' one
                       Cosmos.amxd (built, checked in). Keep in step with Source/dsp; see m4l/README.md
 plugins/dolphinflow/  keyboard chord instrument (own processor and editor; the series' first instrument):
   Source/             DolphinFlowProcessor (params, held-root stack, MIDI + editor-key events via a lock-free FIFO,
-                      MIDI out of the played notes), DolphinFlowEditor (computer keys, RootKey piano, glide ribbons)
+                      MIDI out of the played notes), NoteOut (MIDI out: MPE channel per note, glides as pitch
+                      bends, re-sent on host play/record start), MpePort (virtual "Animal Audio - Dolphin Flow" MIDI port mirroring MIDI out,
+                      since Live drops VST3 pitch bend output; FIFO + sender thread; opened only when a host loads the plugin, tests call openMpePort), DolphinFlowEditor (computer keys, RootKey piano, glide ribbons)
   Source/dsp/         Chords (10 qualities, identifyChord), VoiceLeader (least-movement voicing), DolphinFlowEngine
                       (paraphonic glide synth), Progression (8 arrangement slots, loop maths, settled voicing, clip notes)
   Source/ui/          ArrangeView (SlotCell squares, LOOP, ClipButton drag/save .mid),
@@ -131,7 +133,7 @@ scripts/verify_plugin.sh Duck                               # build + ctest + sc
 ```
 
 - Offline / cached deps: `-DFETCHCONTENT_SOURCE_DIR_JUCE=/path/to/JUCE -DFETCHCONTENT_SOURCE_DIR_CATCH2=/path/to/Catch2`.
-- Options: `AA_BUILD_TESTS` (ON), `AA_BUILD_STANDALONE` (OFF), `AA_COPY_PLUGINS_AFTER_BUILD` (OFF; ON via `scripts/configure.sh` on macOS), `AA_LOCAL_BUILD` (OFF; ON via `configure.sh` / `install_plugins.py --build` so dev bundles are `… Local.vst3`; release scripts set OFF), `AA_PLUGINS="duck;..."`.
+- Options: `AA_BUILD_TESTS` (ON), `AA_BUILD_STANDALONE` (OFF), `AA_COPY_PLUGINS_AFTER_BUILD` (OFF; ON via `scripts/configure.sh` on macOS), `AA_LOCAL_BUILD` (OFF; ON via `configure.sh` / `install_plugins.py --build` so dev bundles are `… Local.vst3` with their own bundle id (`.local`) and plugin code (first three letters + `L`), a separate plugin in Live beside the release; release scripts set OFF), `AA_PLUGINS="duck;..."`.
 - Linux needs the X11/ALSA/freetype dev packages listed in README.md. Most tests do not need a display: UI is
   rendered to an `Image` via `createComponentSnapshot`. The `real mouse` suite (`shared/testing/.../RealMouseSuite.h`,
   `AA_REAL_MOUSE_PLUGIN_TESTS`) puts the editor in a native window and injects events through `ComponentPeer`, at several
@@ -357,6 +359,10 @@ out, no audio input). Roots come from computer keys (editor) or MIDI notes; the 
   it at block start. MIDI is handled sample-accurately (the block is rendered in pieces between events). Both feed one
   held-root stack (editor keys use sources >= `kKeySourceBase`, MIDI uses the note number); releasing the newest
   falls back to the next one held, else releases (unless `latch`). A `chord` change re-voices a sounding chord.
+  A MIDI root's octave (`note / 12 - kReferenceOctave`, MIDI 60-71 = 0) adds to `octave` for the register centre
+  (clamped +-3), so Live's computer-keyboard Z / X move the chord with the editor closed; editor keys use `octave`
+  alone. Any centre change leads the next chord from the old voicing moved by the same shift (`registerShift`), so
+  the chord moves a whole octave instead of only into range.
 - `VoiceLeader` (JUCE-free, allocation free): enumerates every assignment of chord tones to voices (<= 5^6) that
   covers all kept tones, each voice taking its tone's octave nearest its old note inside centre +-16. Cost = semitones
   moved + 3 per unison + 1.5 if the bass is not the root + 0.75 per doubled colour tone + 0.6 x |mean - centre|. With

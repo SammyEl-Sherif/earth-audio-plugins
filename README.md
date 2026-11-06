@@ -178,7 +178,8 @@ every change each note glides into its place in the new chord, so progressions m
 melodic house pads, tech house stabs, ambient swells, emotional keys.
 
 - **Roots** on Ableton's own computer-keyboard layout: `A W S E D F T G Y H U J` = C to B, or click the on-screen
-  keys, or play MIDI notes (any octave picks the root). Hold several: letting go of the newest falls back to the one
+  keys, or play MIDI notes. The octave you play in moves the chord with it (C3, MIDI 60, sits at OCTAVE), so Live's own
+  `Z` / `X` shift it with the plugin window closed. Hold several: letting go of the newest falls back to the one
   still held.
 - **Chords** on the number row: `1` MAJ, `2` MIN, `3` 7, `4` MAJ7, `5` MIN7, `6` SUS2, `7` SUS4, `8` DIM, `9` ADD9,
   `0` MIN9 (also the CHORD pills, automatable). Changing the chord while one sounds glides into it.
@@ -197,8 +198,15 @@ melodic house pads, tech house stabs, ambient swells, emotional keys.
   Backspace empties it, arrows move the selection. **LOOP** plays it, locked to Live's beat while Live plays, else
   free-running at the host tempo. **COPY MIDI CLIP**: drag it onto a MIDI track to drop one pass of the loop as a clip,
   voiced exactly as it plays; a click saves the `.mid` to `~/Music/Animal Audio/Dolphin Flow` and copies its path.
-- **Recording**: the notes it plays come out as MIDI (the voiced chord, common tones held across changes). In Live, make
-  a second MIDI track with *MIDI From* = the Dolphin Flow track / *Dolphin Flow*, arm it and record. Drop that clip back on
+- **Recording**: the notes it plays come out as MIDI (the voiced chord, common tones held across changes), whether
+  you play them, LATCH holds them or LOOP plays them. In Live, make a second MIDI track with *MIDI From* = the Dolphin
+  Flow track / *Dolphin Flow*, arm it and record: that gets the chords, but Live drops a VST3 plugin's pitch bends, so
+  no glides. **For the glides as MPE** (macOS), record the **Animal Audio - Dolphin Flow** MIDI port the plugin creates instead:
+  in Live's Settings > Link, Tempo & MIDI turn on *Track* and *MPE* for the *Animal Audio - Dolphin Flow* input; on a new MIDI
+  track set *MIDI From* = *Animal Audio - Dolphin Flow*, arm it and record. Each note gets its own channel and every glide is that
+  note's pitch bend (48 semitone range), shown in the clip's MPE tab. Set the Dolphin Flow track's own input to your
+  keyboard, not *All Ins*, or it hears its own output. **MPE** off sends plain channel 1 notes. Notes already sounding are sent again when Live starts playing or recording, so a latched chord or
+  the loop is in the clip from its first beat (in Session view, latch after the clip starts recording). Drop that clip back on
   the Dolphin Flow track and it plays the same voicings and glides (three or more notes held at once are played exactly
   as written; one or two are roots). To record the sound, make an audio track with *Audio From* = the Dolphin Flow
   track, arm it and record.

@@ -119,6 +119,7 @@ DolphinFlowEditor::DolphinFlowEditor(DolphinFlowProcessor& plugin)
     , theme(ui::makeTheme())
     , brand(theme.palette)
     , latchButton("LATCH", theme.palette)
+    , mpeButton("MPE", theme.palette)
     , octaveDown({}, theme.palette)
     , octaveUp({}, theme.palette)
     , keysTab("KEYS", theme.palette)
@@ -162,6 +163,15 @@ DolphinFlowEditor::DolphinFlowEditor(DolphinFlowProcessor& plugin)
     latchButton.setClickingTogglesState(true);
     latchButton.setTooltip("Chords keep ringing after you let go (key L). Turn off to release.");
     addAndMakeVisible(latchButton);
+
+    mpeAttachment =
+        std::make_unique<juce::ButtonParameterAttachment>(*owner.apvts.getParameter(ids::mpe.getParamID()), mpeButton);
+    mpeButton.setClickingTogglesState(true);
+    mpeButton.setTooltip(
+        "MIDI out as MPE, also sent to the \"Animal Audio - Dolphin Flow\" MIDI port. In Live turn on Track + "
+        "MPE for that port (Settings > Link, Tempo & MIDI) and record it on a MIDI track: every glide "
+        "shows as each note's pitch curve. Off: plain notes on channel 1.");
+    addAndMakeVisible(mpeButton);
 
     octaveDown.glyph = [](juce::Graphics& g, juce::Rectangle<float> r, juce::Colour c) { signGlyph(g, r, c, false); };
     octaveUp.glyph = [](juce::Graphics& g, juce::Rectangle<float> r, juce::Colour c) { signGlyph(g, r, c, true); };
@@ -637,6 +647,8 @@ void DolphinFlowEditor::paint(juce::Graphics& g)
     g.setFont(makeFont(11.0f, true, 0.28f));
     g.drawText("MODE", modePills->getBounds().toFloat().translated(0.0f, -17.0f).withHeight(14.0f),
                juce::Justification::centredLeft, false);
+    g.drawText("MIDI", mpeButton.getBounds().toFloat().translated(0.0f, -17.0f).withHeight(14.0f),
+               juce::Justification::centredLeft, false);
     g.drawText("VOICES", voicePills->getBounds().toFloat().translated(0.0f, -17.0f).withHeight(14.0f),
                juce::Justification::centredLeft, false);
 
@@ -684,6 +696,7 @@ void DolphinFlowEditor::resized()
     const auto sound = kSoundPanel.toNearestInt();
     modePills->setBounds(sound.getX() + 16, sound.getY() + 30, animalaudio::ui::ChoicePillRow::widthFor(3), 26);
     voicePills->setBounds(sound.getX() + 16, sound.getY() + 84, animalaudio::ui::ChoicePillRow::widthFor(4), 26);
+    mpeButton.setBounds(voicePills->getRight() - 62, sound.getY() + 30, 62, 26);
 
     const auto chord = kChordPanel.toNearestInt();
     chordPills->setBounds(chord.getX() + 16, chord.getY() + 46, animalaudio::ui::ChoicePillRow::widthFor(10), 30);

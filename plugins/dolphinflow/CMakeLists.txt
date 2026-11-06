@@ -1,6 +1,8 @@
 set(DOLPHINFLOW_SOURCES
     Source/DolphinFlowEditor.cpp
     Source/DolphinFlowProcessor.cpp
+    Source/MpePort.cpp
+    Source/NoteOut.cpp
     Source/dsp/DolphinFlowEngine.cpp
     Source/ui/ArrangeView.cpp
     Source/ui/DolphinFlowMotif.cpp

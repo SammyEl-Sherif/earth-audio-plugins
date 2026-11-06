@@ -47,18 +47,31 @@ function(aa_add_plugin target)
         list(APPEND _formats Standalone)
     endif()
 
+    # A local build is its own plugin to the host (name, bundle id and plugin code), so it sits beside the released
+    # one in Live's browser instead of replacing or shadowing it. Plugin code: first three letters + 'L' ('K' if the
+    # release code already ends in 'L').
     set(_product_name "${AA_PRODUCT_NAME}")
+    set(_bundle_id "${AA_BUNDLE_ID}")
+    set(_plugin_code "${AA_PLUGIN_CODE}")
     if(AA_LOCAL_BUILD)
         set(_product_name "${AA_PRODUCT_NAME} Local")
+        set(_bundle_id "${AA_BUNDLE_ID}.local")
+        string(SUBSTRING "${AA_PLUGIN_CODE}" 0 3 _code_head)
+        string(SUBSTRING "${AA_PLUGIN_CODE}" 3 1 _code_tail)
+        if(_code_tail STREQUAL "L")
+            set(_plugin_code "${_code_head}K")
+        else()
+            set(_plugin_code "${_code_head}L")
+        endif()
     endif()
 
     juce_add_plugin(${target}
         PRODUCT_NAME "${_product_name}"
         COMPANY_NAME "Animal Audio"
         COMPANY_WEBSITE "https://animal.audio"
-        BUNDLE_ID "${AA_BUNDLE_ID}"
+        BUNDLE_ID "${_bundle_id}"
         PLUGIN_MANUFACTURER_CODE AnAu
-        PLUGIN_CODE ${AA_PLUGIN_CODE}
+        PLUGIN_CODE ${_plugin_code}
         FORMATS ${_formats}
         VST3_CATEGORIES ${_vst3_categories}
         IS_SYNTH ${AA_IS_SYNTH}
