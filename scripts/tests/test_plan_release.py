@@ -107,6 +107,15 @@ class PlanTests(unittest.TestCase):
         git(self.repo, "commit", "-qm", "fix: test helper")
         self.assertIsNone(self.plan("duck"))
 
+    def test_max_for_live_devices_do_not_count(self) -> None:
+        # The .amxd devices are separate files, not part of the VST3 binary.
+        for folder in ("shared/m4l", "plugins/duck/m4l"):
+            (self.repo / folder).mkdir(parents=True)
+            (self.repo / folder / "x.py").write_text("")
+        git(self.repo, "add", ".")
+        git(self.repo, "commit", "-qm", "feat: max for live device")
+        self.assertIsNone(self.plan("duck"))
+
     def test_other_plugin_changes_do_not_count(self) -> None:
         self.change("plugins/owl/CMakeLists.txt", "feat: owl only")
         self.assertIsNone(self.plan("duck"))

@@ -3,6 +3,7 @@
 //
 // in1/in2: audio L/R. in3: plugphasor~ (0..1 per beat, sample-locked to Live).
 // out1/out2: audio L/R. out3: looper state (0 empty, 1 rec, 2 play, 3 dub, 4 stopped). out4: loop position 0..1.
+// out5: loop length in seconds (while recording: the time recorded so far). out3..out5 are UI monitors.
 //
 // Signal path, per sample:
 //   input (+ phrase loop if PRE-FX) -> history (frozen while HOLD) <- REPEATS feedback
@@ -92,7 +93,7 @@ Param cmdrec(0, min=0, max=1000000000);
 Param cmdstop(0, min=0, max=1000000000);
 Param cmdclear(0, min=0, max=1000000000);
 Param hostplaying(0, min=0, max=1);
-Param hostspb(0, min=0, max=10000000);
+Param hostbpm(0, min=0, max=1000);
 Param hostbeats(0, min=-1000000, max=1000000000);
 
 // ---------- state ----------
@@ -350,7 +351,7 @@ envatt = lerpf(peek(tbl, TATT + shi), peek(tbl, TATT + shi + 1), sht);
 envrel = lerpf(peek(tbl, TREL + shi), peek(tbl, TREL + shi + 1), sht);
 
 // Clock: Live's tempo when synced, else our own.
-hosttempo = hostspb > 1 ? 60 * sr / hostspb : tempo;
+hosttempo = hostbpm > 1 ? hostbpm : tempo;
 bpm = clamp(sync > 0.5 ? hosttempo : tempo, 20, 400);
 mult = peek(tbl, TTIMES + clamp(floor(timesel + 0.5), 0, 5));
 stepsamps = clamp(sr * 60 / (bpm * mult), sr * 0.02, sr * 8);
@@ -1151,3 +1152,4 @@ out1 = fixdenorm(outl);
 out2 = fixdenorm(outr);
 out3 = lstate;
 out4 = llen > 0 ? lhead / llen : (lstate == 1 ? lhead / lcap : 0);
+out5 = (lstate == 1 ? lhead : llen) / sr;

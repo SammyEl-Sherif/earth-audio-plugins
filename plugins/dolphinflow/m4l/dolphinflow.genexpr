@@ -1,0 +1,466 @@
+// DOLPHIN FLOW for Max for Live: a GenExpr port of Source/dsp/DolphinFlowEngine (paraphonic glide synth), the
+// shared Svf and FdnReverb, and the LOOP sequencer of DolphinFlowProcessor / Progression.h.
+// The chord logic (which note each voice goes to) runs in logic.js; this file does everything per sample.
+//
+// in1: plugphasor~ (0..1 per beat, sample-locked to Live).
+// out1/out2: audio L/R. out3..out8: voice pitches (fractional MIDI note, -1 silent). out9: envelope level.
+// out10: playing loop slot (-1 when not looping). out11: progress through it 0..1. out12: sounding 0/1.
+//
+// From logic.js (not Live parameters): a voicing n0..n5 + nv + gon, latched when `trig` changes (sent last, so a
+// voicing never tears); `rel` / `kill` counters; the loop's settled voicings t<k>len, t<k>n<j>, lv, latched when
+// `tver` changes.
+//
+// Per sample: events -> envelope -> 6 voices (glide, 2 PolyBLEP saws, equal-power pan) -> low-pass (TONE + mode
+// filter envelope) -> 8-line FDN reverb (SPACE) -> LEVEL. The C++ updates pitch / filter / pan every 8 samples;
+// here they run every sample (same curves).
+
+// ---------- pure helpers (no helper calls another)
+
+// Band-limiting correction for a saw's reset at phase 0 (two-sample polynomial BLEP).
+blep(ph, inc) {
+	t1 = ph / inc;
+	t2 = (ph - 1) / inc;
+	a = ((t1 + t1) - (t1 * t1)) - 1;
+	b = ((t2 * t2) + (t2 + t2)) + 1;
+	return ph < inc ? a : (ph > (1 - inc) ? b : 0);
+}
+
+// One-pole smoother; snaps to the first target it sees. Each call site keeps its own state.
+smooth(target, coeff) {
+	History cur(0);
+	History primed(0);
+	if (primed < 0.5) {
+		cur = target;
+		primed = 1;
+	}
+	cur = target + (coeff * (cur - target));
+	if (abs(cur - target) < 0.00002) {
+		cur = target;
+	}
+	return cur;
+}
+
+// Trapezoidal SVF low-pass (Simper form). Each call site keeps its own state.
+svflp(x, a1, a2, a3) {
+	History ic1(0);
+	History ic2(0);
+	v3 = x - ic2;
+	v1 = (a1 * ic1) + (a2 * v3);
+	v2 = ic2 + ((a2 * ic1) + (a3 * v3));
+	ic1 = (2 * v1) - ic1;
+	ic2 = (2 * v2) - ic2;
+	return v2;
+}
+
+// ---------- Live parameters (percent knobs arrive as 0..100)
+
+Param mode(0, min=0, max=2);
+Param glide(350, min=0, max=2000);
+Param curve(50, min=0, max=100);
+Param tone(55, min=0, max=100);
+Param width(35, min=0, max=100);
+Param space(25, min=0, max=100);
+Param level(70, min=0, max=100);
+Param loopon(0, min=0, max=1);
+Param hostplaying(0, min=0, max=1);
+Param hostbpm(0, min=0, max=1000);
+Param hostbeats(0, min=-1000000, max=1000000000);
+
+// ---------- from logic.js
+
+Param n0(60, min=0, max=127);
+Param n1(64, min=0, max=127);
+Param n2(67, min=0, max=127);
+Param n3(72, min=0, max=127);
+Param n4(0, min=0, max=127);
+Param n5(0, min=0, max=127);
+Param nv(4, min=0, max=6);
+Param gon(0, min=0, max=1);
+Param trig(0, min=0, max=1000000000);
+Param rel(0, min=0, max=1000000000);
+Param kill(0, min=0, max=1000000000);
+Param lv(4, min=0, max=6);
+Param tver(0, min=0, max=1000000000);
+// @insert tableparams
+
+// ---------- state
+
+Data vs(6, 6);    // per voice: 0 pitch, 1 glide start, 2 target, 3 glide progress, 4 saw A phase, 5 saw B phase
+Data nl(6);       // the live voicing, latched at `trig`
+Data tbl(8, 6);   // the loop's voicing per slot
+Data lens(8);     // slot length in beats (0 = empty)
+Data ends(8);     // running end beat of each slot
+Delay ap0(1024);
+Delay ap1(1024);
+Delay ap2(1024);
+Delay ap3(1024);
+Delay rv0(8192);
+Delay rv1(8192);
+Delay rv2(8192);
+Delay rv3(8192);
+Delay rv4(8192);
+Delay rv5(8192);
+Delay rv6(8192);
+Delay rv7(8192);
+
+History lasttrig(0);
+History lastrel(0);
+History lastkill(0);
+History lastver(-1);
+History tlv(4);
+History vcount(0);    // voices in the current voicing
+History vgain(0.16);
+History hasch(0);     // a chord has been played (cleared by kill)
+History gateh(0);     // held
+History stage(0);     // 0 idle, 1 attack, 2 decay / sustain, 3 release
+History envl(0);
+History fenv(0);
+History waslooping(0);
+History seqbeats(0);
+History seqidx(-1);
+History seqinto(0);
+History rvlfo(0);
+History low0(0);
+History low1(0);
+History low2(0);
+History low3(0);
+History low4(0);
+History low5(0);
+History low6(0);
+History low7(0);
+
+fs = samplerate;
+
+// ---------- the loop table (copied when logic.js bumps tver, after sending every value)
+
+tverev = tver != lastver;
+if (tverev) {
+	// @insert tablecopy
+	tlv = clamp(floor(lv + 0.5), 1, 6);
+	lastver = tver;
+}
+
+// ---------- LOOP: which slot is playing (host beat position while Live plays, else free-running from LOOP on)
+
+total = peek(ends, 7, 0);
+looping = (loopon > 0.5) && (total > 0);
+if (looping && (waslooping < 0.5)) {
+	seqbeats = 0;
+}
+spb = hostbpm > 1 ? ((60 * fs) / hostbpm) : (fs * 0.5);
+ramp = clamp(in1, 0, 0.999999);
+hostpos = round(hostbeats - ramp) + ramp;
+beats = hostplaying > 0.5 ? hostpos : seqbeats;
+tot = max(total, 0.000001);
+lpos = beats - (tot * floor(beats / tot));
+// Running ends skip empty slots: the slot is how many ends lie at or before the position.
+tidx = (peek(ends, 0, 0) <= lpos) + (peek(ends, 1, 0) <= lpos) + (peek(ends, 2, 0) <= lpos) + (peek(ends, 3, 0) <= lpos) + (peek(ends, 4, 0) <= lpos) + (peek(ends, 5, 0) <= lpos) + (peek(ends, 6, 0) <= lpos);
+tidx = min(tidx, 7);
+tstart = tidx > 0.5 ? peek(ends, max(tidx - 1, 0), 0) : 0;
+tlen = peek(lens, tidx, 0);
+into = lpos - tstart;
+// An edit that changes the playing slot's notes plays it again (other edits don't re-strike it).
+tdiff = (tlv != vcount) + ((0 < tlv) * abs(peek(tbl, tidx, 0) - peek(vs, 0, 2))) + ((1 < tlv) * abs(peek(tbl, tidx, 1) - peek(vs, 1, 2))) + ((2 < tlv) * abs(peek(tbl, tidx, 2) - peek(vs, 2, 2))) + ((3 < tlv) * abs(peek(tbl, tidx, 3) - peek(vs, 3, 2))) + ((4 < tlv) * abs(peek(tbl, tidx, 4) - peek(vs, 4, 2))) + ((5 < tlv) * abs(peek(tbl, tidx, 5) - peek(vs, 5, 2)));
+wrapped = into < (seqinto - 0.000001);
+slotev = looping && ((tidx != seqidx) || wrapped || (tverev && (tdiff > 0)));
+
+// ---------- mode: envelope and filter envelope (DolphinFlowEngine::envelopeFor)
+
+md = clamp(floor(mode + 0.5), 0, 2);
+tatt = md < 0.5 ? 0.45 : (md < 1.5 ? 0.003 : 0.004);
+tdec = md < 0.5 ? 0.5 : (md < 1.5 ? 0.28 : 1.4);
+esus = md < 0.5 ? 1 : (md < 1.5 ? 0 : 0.3);
+trel = md < 0.5 ? 1.8 : (md < 1.5 ? 0.15 : 0.6);
+foct = md < 0.5 ? 0 : (md < 1.5 ? 3 : 1.5);
+tfil = md < 0.5 ? 0.5 : (md < 1.5 ? 0.16 : 0.5);
+fq = md < 0.5 ? 0.8 : (md < 1.5 ? 1.3 : 0.9);
+restrike = md > 0.5;
+astep = 1 / max(1, tatt * fs);
+dcoef = exp(-4.6 / max(1, tdec * fs));
+rcoef = exp(-4.6 / max(1, trel * fs));
+fcoef = exp(-4.6 / max(1, tfil * fs));
+gsamps = glide * 0.001 * fs;
+gstep = (gsamps >= 1) ? (1 / gsamps) : 1;
+
+// ---------- events: kill, release, then a new voicing (live from logic.js, or the loop's next slot)
+
+trigev = trig != lasttrig;
+lasttrig = trig;
+relev = rel != lastrel;
+lastrel = rel;
+killev = kill != lastkill;
+lastkill = kill;
+if (killev) {
+	stage = 0;
+	envl = 0;
+	fenv = 0;
+	hasch = 0;
+	gateh = 0;
+}
+if (relev && (looping == 0)) {
+	gateh = 0;
+	if (stage > 0.5) {
+		stage = 3;
+	}
+}
+playev = (trigev && (looping == 0)) || slotev;
+if (playev) {
+	poke(nl, n0, 0, 0);
+	poke(nl, n1, 1, 0);
+	poke(nl, n2, 2, 0);
+	poke(nl, n3, 3, 0);
+	poke(nl, n4, 4, 0);
+	poke(nl, n5, 5, 0);
+	cnt = looping ? tlv : clamp(floor(nv + 0.5), 1, 6);
+	// Glide only from notes still sounding; after silence the chord simply starts on its notes.
+	snd = (hasch > 0.5) && (stage > 0.5);
+	for (v = 0; v < 6; v += 1) {
+		if (v < cnt) {
+			tg = looping ? peek(tbl, tidx, v) : peek(nl, v, 0);
+			was = snd && (v < vcount);
+			pnow = peek(vs, v, 0);
+			stv = was ? pnow : tg;
+			prv = (was && (gstep < 1)) ? 0 : 1;
+			pitch0 = prv >= 1 ? tg : stv;
+			poke(vs, pitch0, v, 0);
+			poke(vs, stv, v, 1);
+			poke(vs, tg, v, 2);
+			poke(vs, prv, v, 3);
+			if (was < 0.5) {
+				// Spread the starting phases so a fresh chord does not start with every saw in step.
+				pha = 0.13 * v;
+				phb = 0.57 + (0.21 * v);
+				phb = phb - floor(phb);
+				poke(vs, pha, v, 4);
+				poke(vs, phb, v, 5);
+			}
+		}
+	}
+	vcount = cnt;
+	vgain = 0.32 / sqrt(cnt);
+	if (looping || (gon > 0.5)) {
+		hasch = 1;
+		// PAD is legato; STAB / KEYS strike again. The attack rises from the current level: no click.
+		if ((gateh < 0.5) || restrike) {
+			stage = 1;
+			fenv = 1;
+		}
+		gateh = 1;
+	}
+}
+
+// ---------- envelope
+
+if (stage == 1) {
+	envl = envl + astep;
+	if (envl >= 1) {
+		envl = 1;
+		stage = 2;
+	}
+} else if (stage == 2) {
+	envl = esus + ((envl - esus) * dcoef);
+} else if (stage == 3) {
+	envl = envl * rcoef;
+	if (envl < 0.0001) {
+		envl = 0;
+		stage = 0;
+	}
+} else {
+	envl = 0;
+}
+fenv = fenv * fcoef;
+
+// ---------- voices
+
+c30 = exp(-1 / (0.030 * fs));
+c40 = exp(-1 / (0.040 * fs));
+c20 = exp(-1 / (0.020 * fs));
+tn = smooth(clamp(tone * 0.01, 0, 1), c30);
+wd = smooth(clamp(width * 0.01, 0, 1), c40);
+spc = smooth(clamp(space * 0.01, 0, 1), c40);
+gcurve = clamp(curve * 0.01, 0, 1);
+up = exp2(((0.03 + (0.22 * wd)) * 0.5) / 12);
+suml = 0;
+sumr = 0;
+for (v = 0; v < 6; v += 1) {
+	if (v < vcount) {
+		pt = peek(vs, v, 0);
+		pr = peek(vs, v, 3);
+		if (pr < 1) {
+			pr = min(1, pr + gstep);
+			u = 1 - pr;
+			gsh = pr + (gcurve * ((1 - (u * u * u)) - pr));
+			gst = peek(vs, v, 1);
+			gtg = peek(vs, v, 2);
+			pt = gst + ((gtg - gst) * gsh);
+			poke(vs, pr, v, 3);
+			poke(vs, pt, v, 0);
+		}
+		hz = 440 * exp2((pt - 69) / 12);
+		ia = min(0.45, (hz * up) / fs);
+		ib = min(0.45, hz / (up * fs));
+		pa = peek(vs, v, 4);
+		pb = peek(vs, v, 5);
+		ba = blep(pa, ia);
+		bb = blep(pb, ib);
+		s = 0.5 * ((((2 * pa) - 1) - ba) + (((2 * pb) - 1) - bb));
+		pa = pa + ia;
+		pa = pa - (pa >= 1);
+		pb = pb + ib;
+		pb = pb - (pb >= 1);
+		poke(vs, pa, v, 4);
+		poke(vs, pb, v, 5);
+		// Equal-power pan, voices fanned across the field by WIDTH; unity gain at centre.
+		spread = vcount > 1 ? (((2 * v) / (vcount - 1)) - 1) : 0;
+		ang = pi * (0.25 + (0.25 * spread * wd));
+		suml += s * cos(ang);
+		sumr += s * sin(ang);
+	}
+}
+audible = (stage > 0.5) || (envl > 0);
+vamp = envl * vgain * 1.41421356;
+
+// ---------- TONE: shared low-pass, 80 Hz .. 20 kHz plus the mode's filter envelope
+
+cutoff = 80 * exp2((8 * tn) + (foct * fenv));
+fc = clamp(cutoff, 10, 0.49 * fs);
+fg = tan((pi * fc) / fs);
+fk = 1 / max(0.05, fq);
+fa1 = 1 / (1 + (fg * (fg + fk)));
+fa2 = fg * fa1;
+fa3 = fg * fa2;
+filtl = svflp(suml * vamp, fa1, fa2, fa3);
+filtr = svflp(sumr * vamp, fa1, fa2, fa3);
+dryl = audible ? filtl : 0;
+dryr = audible ? filtr : 0;
+
+// ---------- SPACE: 8-line FDN reverb (shared FdnReverb: allpass diffusion, Hadamard, damping, modulated lines)
+
+msc = fs / 1000;
+dl0 = ap0.read(max(4, floor(4.77 * msc)));
+dv0 = dryl + (0.6 * dl0);
+ap0.write(dv0);
+dx = dl0 - (0.6 * dv0);
+dl1 = ap1.read(max(4, floor(3.59 * msc)));
+dv1 = dx + (0.6 * dl1);
+ap1.write(dv1);
+diffl = dl1 - (0.6 * dv1);
+dl2 = ap2.read(max(4, floor(5.13 * msc)));
+dv2 = dryr + (0.6 * dl2);
+ap2.write(dv2);
+dx = dl2 - (0.6 * dv2);
+dl3 = ap3.read(max(4, floor(3.31 * msc)));
+dv3 = dx + (0.6 * dl3);
+ap3.write(dv3);
+diffr = dl3 - (0.6 * dv3);
+
+rvlfo = rvlfo + (0.37 / fs);
+rvlfo = rvlfo - (rvlfo >= 1);
+rmd = (12 * msc) / 48;
+len0 = max(8, 29.7 * msc);
+len1 = max(8, 37.1 * msc);
+len2 = max(8, 41.1 * msc);
+len3 = max(8, 43.7 * msc);
+len4 = max(8, 53.3 * msc);
+len5 = max(8, 59.9 * msc);
+len6 = max(8, 67.7 * msc);
+len7 = max(8, 73.1 * msc);
+t0 = rv0.read(len0 + ((rmd * (1 + sin((2 * pi) * rvlfo))) * 0.7));
+t1 = rv1.read(len1 + (rmd * (1 + sin((2 * pi) * (rvlfo + 0.125)))));
+t2 = rv2.read(len2 + ((rmd * (1 + sin((2 * pi) * (rvlfo + 0.25)))) * 0.7));
+t3 = rv3.read(len3 + (rmd * (1 + sin((2 * pi) * (rvlfo + 0.375)))));
+t4 = rv4.read(len4 + ((rmd * (1 + sin((2 * pi) * (rvlfo + 0.5)))) * 0.7));
+t5 = rv5.read(len5 + (rmd * (1 + sin((2 * pi) * (rvlfo + 0.625)))));
+t6 = rv6.read(len6 + ((rmd * (1 + sin((2 * pi) * (rvlfo + 0.75)))) * 0.7));
+t7 = rv7.read(len7 + (rmd * (1 + sin((2 * pi) * (rvlfo + 0.875)))));
+wetl = 0.5 * (((t0 - t2) + t4) - t6);
+wetr = 0.5 * (((t1 - t3) + t5) - t7);
+
+// Hadamard 8 (span 1, 2, 4), normalised by 1/sqrt(8).
+h0 = t0 + t1;
+h1 = t0 - t1;
+h2 = t2 + t3;
+h3 = t2 - t3;
+h4 = t4 + t5;
+h5 = t4 - t5;
+h6 = t6 + t7;
+h7 = t6 - t7;
+j0 = h0 + h2;
+j2 = h0 - h2;
+j1 = h1 + h3;
+j3 = h1 - h3;
+j4 = h4 + h6;
+j6 = h4 - h6;
+j5 = h5 + h7;
+j7 = h5 - h7;
+hn = 0.35355339;
+m0 = (j0 + j4) * hn;
+m4 = (j0 - j4) * hn;
+m1 = (j1 + j5) * hn;
+m5 = (j1 - j5) * hn;
+m2 = (j2 + j6) * hn;
+m6 = (j2 - j6) * hn;
+m3 = (j3 + j7) * hn;
+m7 = (j3 - j7) * hn;
+
+// RT60 1.2 .. 5.2 s with SPACE (the C++ sets it from the unsmoothed parameter); damping 0.45.
+decay = (1.2 + (4 * clamp(space * 0.01, 0, 1))) * fs;
+damp = 0.45;
+w0 = m0 * pow(10, (-3 * len0) / decay);
+low0 = w0 + (damp * (low0 - w0));
+rin0 = low0 + (diffl * 0.5);
+rv0.write(rin0);
+w1 = m1 * pow(10, (-3 * len1) / decay);
+low1 = w1 + (damp * (low1 - w1));
+rin1 = low1 + (diffr * 0.5);
+rv1.write(rin1);
+w2 = m2 * pow(10, (-3 * len2) / decay);
+low2 = w2 + (damp * (low2 - w2));
+rin2 = low2 + (diffl * 0.5);
+rv2.write(rin2);
+w3 = m3 * pow(10, (-3 * len3) / decay);
+low3 = w3 + (damp * (low3 - w3));
+rin3 = low3 + (diffr * 0.5);
+rv3.write(rin3);
+w4 = m4 * pow(10, (-3 * len4) / decay);
+low4 = w4 + (damp * (low4 - w4));
+rin4 = low4 + (diffl * 0.5);
+rv4.write(rin4);
+w5 = m5 * pow(10, (-3 * len5) / decay);
+low5 = w5 + (damp * (low5 - w5));
+rin5 = low5 + (diffr * 0.5);
+rv5.write(rin5);
+w6 = m6 * pow(10, (-3 * len6) / decay);
+low6 = w6 + (damp * (low6 - w6));
+rin6 = low6 + (diffl * 0.5);
+rv6.write(rin6);
+w7 = m7 * pow(10, (-3 * len7) / decay);
+low7 = w7 + (damp * (low7 - w7));
+rin7 = low7 + (diffr * 0.5);
+rv7.write(rin7);
+
+// ---------- LEVEL (level^2 x 1.4, 20 ms) and the mix
+
+master = smooth(clamp(level * 0.01, 0, 1) * clamp(level * 0.01, 0, 1) * 1.4, c20);
+outl = ((dryl * (1 - (0.3 * spc))) + (wetl * spc * 0.9)) * master;
+outr = ((dryr * (1 - (0.3 * spc))) + (wetr * spc * 0.9)) * master;
+
+// ---------- sequencer state for the next sample
+
+seqinto = looping ? into : 0;
+seqidx = looping ? tidx : -1;
+seqbeats = beats + (1 / spb);
+waslooping = looping;
+
+out1 = fixdenorm(outl);
+out2 = fixdenorm(outr);
+out3 = (audible && (0 < vcount)) ? peek(vs, 0, 0) : -1;
+out4 = (audible && (1 < vcount)) ? peek(vs, 1, 0) : -1;
+out5 = (audible && (2 < vcount)) ? peek(vs, 2, 0) : -1;
+out6 = (audible && (3 < vcount)) ? peek(vs, 3, 0) : -1;
+out7 = (audible && (4 < vcount)) ? peek(vs, 4, 0) : -1;
+out8 = (audible && (5 < vcount)) ? peek(vs, 5, 0) : -1;
+out9 = envl;
+out10 = seqidx;
+out11 = looping ? clamp(into / max(tlen, 0.000001), 0, 1) : 0;
+out12 = stage > 0.5;

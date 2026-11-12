@@ -84,7 +84,9 @@ left panel. That is how the user confirms the host loaded the build you just ins
    **Use VST3 Plug-In System Folders** is **on**.
 2. Click **Rescan**. If a plugin does not appear, or still looks like an old build, hold **Alt** (Windows) /
    **Option** (macOS) while clicking Rescan for a full rescan. If it still shows the old build, quit and reopen Live.
-3. Find the plugins under **Plug-Ins > VST3** (Animal Audio), drop one on an audio track and test it.
+3. Find the plugins under **Plug-Ins > VST3** (Animal Audio), drop one on an audio track and test it. Everything
+   from this repo, VST3s and the Max for Live devices (installed into the User Library by the same script), is under
+   the browser tag **Creator > Animal Audio**.
 4. Check the build stamp in the plugin matches what the script printed.
 5. Tracks that used an older build keep their saved state, but the UI/DSP come from the newly loaded binary; if
    a project still behaves like the old build, delete the device and add it again.

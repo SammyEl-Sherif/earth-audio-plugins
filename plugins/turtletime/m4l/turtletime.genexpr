@@ -1,0 +1,312 @@
+// TURTLE TIME for Max for Live: a GenExpr port of plugins/turtletime/Source/dsp (TurtleTimeEngine + TimePatterns),
+// for gen~ so it runs on Push 3 standalone. Keep in step with the C++ engine; the pattern table is generated from
+// TimePatterns.h at build time (device.py).
+//
+// in1/in2: audio L/R. in3: plugphasor~ (0..1 per beat, sample-locked to Live).
+// out1/out2: audio L/R. out3: window phase 0..1 (NOW). out4: read marker 0..1 (READ). out5/out6: input / output
+// peak (|L| max |R|). out7: host tempo in BPM (0 while Live reports none).
+//
+// Input is written into a circular history at 1x; a pattern reads it back at a signed rate with 4-point cubic
+// interpolation. On each musical window (locked to Live's beat position) the read head snaps to "now" (catch-up) or
+// a captured slice repeats; a <=10 ms crossfade from the old head hides every jump. Keep pitch turns the head of a
+// slowed pattern into two 40 ms periodic-Hann grains read at 1x whose starts follow the slow position, each new
+// start nudged within +-10 ms (never past the write head) to best match the grain it overlaps. Stopped, the input
+// passes dry (the history still records) and the next playing sample snaps.
+//
+// Differences from the plugin: a 2^20-sample history (21.8 s at 48 kHz, not 32 s), always stereo, and the beat
+// position comes from plugphasor~ + plugsync~ instead of the VST3 playhead.
+
+// ---------- pure helpers ----------
+
+catmull(y0, y1, y2, y3, t) {
+	t2 = t * t;
+	t3 = t2 * t;
+	a = (2 * y1) + ((y2 - y0) * t);
+	b = ((2 * y0) - (5 * y1)) + ((4 * y2) - y3);
+	c = ((3 * y1) - y0) + (y3 - (3 * y2));
+	return 0.5 * ((a + (b * t2)) + (c * t3));
+}
+
+// ---------- parameters (Mix arrives as 0..100) ----------
+
+Param pattern(6, min=0, max=31);
+Param drywet(100, min=0, max=100);
+Param keeppitch(0, min=0, max=1);
+Param hostplaying(0, min=0, max=1);
+Param hostbpm(0, min=0, max=1000);
+Param hostbeats(0, min=-1000000, max=1000000000);
+
+// ---------- state ----------
+
+// History: channel 0 = L, 1 = R, 2 = L + R (the mono sum the grain aligner compares, one peek per tap).
+Data hist(1048576, 3);
+// Pattern table (filled on the first sample): rate, window beats, slice beats, mode (0 catch-up, 1 repeat).
+Data pat(32, 4);
+// Read heads, one per channel (0 = playing, 1 = fading out): position, rate, grains, start0, age0, start1, age1.
+Data rd(7, 2);
+// Scratch for the grain aligner's best shift.
+Data scr(1);
+
+History ready(0);
+History writeidx(0);
+History lastwindow(0);
+History lastslice(-1);
+History anchor(0);
+History primed(0);
+History patdirty(0);
+History lastpat(-1);
+History holding(0);
+History lastkeep(0);
+History faderem(0);
+History fadespan(1);
+History mixs(1);
+
+if (ready < 0.5) {
+	// @insert patterns
+	ready = 1;
+}
+
+// ---------- per-sample constants ----------
+
+sr = samplerate;  // GenExpr has no built-in `sr`
+
+HN = 1048576;
+XFADE = max(1, round(sr * 0.010));
+GL = 2 * max(1, round(sr * 0.020));
+HALF = GL * 0.5;
+SEARCH = round(sr * 0.010);
+CTX = max(1, round(sr * 0.008));
+
+// ---------- pattern ----------
+
+pidx = clamp(floor(pattern + 0.5), 0, 31);
+prate = peek(pat, pidx, 0);
+pwin = peek(pat, pidx, 1);
+pslice = peek(pat, pidx, 2);
+prep = peek(pat, pidx, 3) > 0.5;
+if (pidx != lastpat) {
+	patdirty = 1;
+	lastpat = pidx;
+}
+keepnow = keeppitch > 0.5;
+keepdirty = keepnow != (lastkeep > 0.5);
+lastkeep = keepnow;
+
+// ---------- transport ----------
+
+playing = hostplaying > 0.5;
+ramp = clamp(in3, 0, 0.999999);
+ppq = playing ? (round(hostbeats - ramp) + ramp) : hostbeats;
+spb = hostbpm > 1 ? ((60 * sr) / hostbpm) : (sr * 0.5);
+bpm = hostbpm > 1 ? hostbpm : 0;
+
+win = pwin > 0.000001 ? pwin : 1;
+widx = floor(ppq / win);
+into = clamp(ppq - (widx * win), 0, win);
+play = into / win;
+slen = pslice > 0.000001 ? pslice : win;
+smark = (into - (floor(into / slen) * slen)) / win;
+cmark = prate >= 0 ? clamp(prate * play, 0, 1) : clamp(1 + (prate * play), 0, 1);
+marker = playing ? (prep ? smark : cmark) : play;
+
+mixc = exp(-1 / (0.015 * sr));
+mixs = (drywet * 0.01) + (mixc * (mixs - (drywet * 0.01)));
+
+dl = in1;
+dr = in2;
+dm = dl + dr;
+outl = dl;
+outr = dr;
+
+if (playing) {
+	if (holding > 0.5) {
+		patdirty = 1;
+		holding = 0;
+	}
+
+	// ---------- window / slice / restyle events
+	fbeats = (prep && (pslice > 0)) ? pslice : win;
+	fspan = min(XFADE, max(1, floor((fbeats * spb) * 0.25)));
+	sidx = (prep && (pslice > 0.000001)) ? floor(into / pslice) : 0;
+	newwin = ((primed < 0.5) || (widx != lastwindow)) || (patdirty > 0.5);
+	newslice = (prep && (!newwin)) && (sidx != lastslice);
+	currate = peek(rd, 1, 0);
+	curgrains = peek(rd, 2, 0) > 0.5;
+	wantgrains = (keepnow && (currate > 0)) && (currate < 1);
+	restyle = ((keepdirty && (primed > 0.5)) && ((!newwin) && (!newslice))) && (wantgrains != curgrains);
+	jump = ((newwin && (primed > 0.5)) || newslice) || restyle;
+	dostart = (newwin || newslice) || restyle;
+
+	// the old head keeps playing underneath the new one for the crossfade
+	if (jump) {
+		for (k = 0; k < 7; k += 1) {
+			hv = peek(rd, k, 0);
+			poke(rd, hv, k, 1);
+		}
+		fadespan = max(1, fspan);
+		faderem = fadespan;
+	}
+
+	poke(hist, dl, writeidx, 0);
+	poke(hist, dr, writeidx, 1);
+	poke(hist, dm, writeidx, 2);
+
+	if (newwin && prep) {
+		anchor = writeidx;
+	}
+	if (dostart) {
+		spos = restyle ? peek(rd, 0, 0) : (prep ? anchor : writeidx);
+		srate = restyle ? currate : prate;
+		p0 = wrap(spos, 0, HN);
+		g0 = wrap(floor(p0), 0, HN);
+		g1 = wrap(g0 - HALF, 0, HN);
+		sgr = (keepnow && (srate > 0)) && (srate < 1);
+		poke(rd, p0, 0, 0);
+		poke(rd, srate, 1, 0);
+		poke(rd, sgr, 2, 0);
+		poke(rd, g0, 3, 0);
+		poke(rd, 0, 4, 0);
+		poke(rd, g1, 5, 0);
+		poke(rd, HALF, 6, 0);
+	}
+	if (newwin) {
+		lastslice = sidx;
+		patdirty = 0;
+		primed = 1;
+	} else if (newslice) {
+		lastslice = sidx;
+	}
+	lastwindow = widx;
+
+	// ---------- read (head 0 at fadet, head 1 at 1 - fadet while fading)
+	fading = faderem > 0.5;
+	fadet = fading ? (1 - (faderem / fadespan)) : 1;
+	heads = fading ? 2 : 1;
+	wl = 0;
+	wr = 0;
+	for (h = 0; h < heads; h += 1) {
+		wgt = h < 0.5 ? fadet : (1 - fadet);
+		if (peek(rd, 2, h) > 0.5) {
+			for (q = 0; q < 2; q += 1) {
+				gs = peek(rd, 3 + (q * 2), h);
+				age = peek(rd, 4 + (q * 2), h);
+				gi = wrap(gs + age, 0, HN);
+				hw = wgt * (0.5 - (0.5 * cos((twopi * age) / GL)));
+				wl += (hw * peek(hist, gi, 0));
+				wr += (hw * peek(hist, gi, 1));
+			}
+		} else {
+			rp = peek(rd, 0, h);
+			fl = floor(rp);
+			ft = rp - fl;
+			i1 = wrap(fl, 0, HN);
+			i0 = wrap(i1 - 1, 0, HN);
+			i2 = wrap(i1 + 1, 0, HN);
+			i3 = wrap(i1 + 2, 0, HN);
+			cl = catmull(peek(hist, i0, 0), peek(hist, i1, 0), peek(hist, i2, 0), peek(hist, i3, 0), ft);
+			cr = catmull(peek(hist, i0, 1), peek(hist, i1, 1), peek(hist, i2, 1), peek(hist, i3, 1), ft);
+			wl += (wgt * cl);
+			wr += (wgt * cr);
+		}
+	}
+	outl = dl + ((wl - dl) * mixs);
+	outr = dr + ((wr - dr) * mixs);
+
+	writeidx = wrap(writeidx + 1, 0, HN);
+
+	// ---------- advance the heads; a grain that ends restarts at the aligned slow position
+	for (h = 0; h < heads; h += 1) {
+		np = wrap(peek(rd, 0, h) + peek(rd, 1, h), 0, HN);
+		poke(rd, np, 0, h);
+		if (peek(rd, 2, h) > 0.5) {
+			a0 = peek(rd, 4, h) + 1;
+			a1 = peek(rd, 6, h) + 1;
+			poke(rd, a0, 4, h);
+			poke(rd, a1, 6, h);
+			for (q = 0; q < 2; q += 1) {
+				if (peek(rd, 4 + (q * 2), h) >= GL) {
+					poke(rd, 0, 4 + (q * 2), h);
+					nominal = floor(np);
+					o = 1 - q;
+					cont = peek(rd, 3 + (o * 2), h) + peek(rd, 4 + (o * 2), h);
+					ahead = wrap(writeidx - nominal, 0, HN);
+					ahead = ahead > (HN * 0.5) ? 0 : ahead;
+					latest = min(SEARCH, ahead);
+					earliest = 0 - SEARCH;
+
+					// score(shift) = sum a*b / sqrt(sum a*a): candidate's recent past vs the other grain's
+					xcorr = 0;
+					energy = 0.000000000001;
+					for (k = 1; k <= CTX; k += 2) {
+						ca = peek(hist, wrap(nominal - k, 0, HN), 2);
+						xcorr += (ca * peek(hist, wrap(cont - k, 0, HN), 2));
+						energy += (ca * ca);
+					}
+					bestscore = xcorr / sqrt(energy);
+					poke(scr, 0, 0);
+
+					for (sh = earliest; sh <= latest; sh += 3) {
+						if (sh != 0) {
+							xcorr = 0;
+							energy = 0.000000000001;
+							cand = nominal + sh;
+							for (k = 1; k <= CTX; k += 2) {
+								ca = peek(hist, wrap(cand - k, 0, HN), 2);
+								xcorr += (ca * peek(hist, wrap(cont - k, 0, HN), 2));
+								energy += (ca * ca);
+							}
+							sc = xcorr / sqrt(energy);
+							if (sc > bestscore) {
+								bestscore = sc;
+								poke(scr, sh, 0);
+							}
+						}
+					}
+
+					coarse = peek(scr, 0);
+					flo = max(earliest, coarse - 2);
+					fhi = min(latest, coarse + 2);
+					for (sh = flo; sh <= fhi; sh += 1) {
+						if (sh != coarse) {
+							xcorr = 0;
+							energy = 0.000000000001;
+							cand = nominal + sh;
+							for (k = 1; k <= CTX; k += 2) {
+								ca = peek(hist, wrap(cand - k, 0, HN), 2);
+								xcorr += (ca * peek(hist, wrap(cont - k, 0, HN), 2));
+								energy += (ca * ca);
+							}
+							sc = xcorr / sqrt(energy);
+							if (sc > bestscore) {
+								bestscore = sc;
+								poke(scr, sh, 0);
+							}
+						}
+					}
+
+					best = peek(scr, 0);
+					ns = wrap(nominal + best, 0, HN);
+					poke(rd, ns, 3 + (q * 2), h);
+				}
+			}
+		}
+	}
+	if (fading) {
+		faderem = faderem - 1;
+	}
+} else {
+	// stopped: dry, keep recording, snap on resume
+	holding = 1;
+	poke(hist, dl, writeidx, 0);
+	poke(hist, dr, writeidx, 1);
+	poke(hist, dm, writeidx, 2);
+	writeidx = wrap(writeidx + 1, 0, HN);
+}
+
+out1 = outl;
+out2 = outr;
+out3 = clamp(play, 0, 1);
+out4 = clamp(marker, 0, 1);
+out5 = max(abs(dl), abs(dr));
+out6 = max(abs(outl), abs(outr));
+out7 = bpm;

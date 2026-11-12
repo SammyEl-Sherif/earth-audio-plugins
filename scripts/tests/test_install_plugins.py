@@ -210,6 +210,67 @@ class RepoDiscoveryTest(unittest.TestCase):
         self.assertEqual(len(names), len(folders))
         self.assertIn("Duck", names)
 
+class MaxForLiveTagTest(unittest.TestCase):
+    """The Max for Live devices go into the User Library with a Live 12 tag sidecar (Creator|Animal Audio)."""
+
+    def keywords(self, xml, name):
+        root = ip.ET.fromstring(xml)
+        for li in root.iter(f"{{{ip.XMP_NS['rdf']}}}li"):
+            path = li.find("ablFR:filePath", ip.XMP_NS)
+            if path is not None and path.text == name:
+                return [k.text for k in li.findall("ablFR:keywords/rdf:Bag/rdf:li", ip.XMP_NS)]
+        return None
+
+    def test_new_sidecar_tags_every_device(self):
+        xml = ip.tagged_sidecar(None, ["Duck.amxd", "Cosmos.amxd"])
+        self.assertIn("application/vnd.ableton.folder", xml)
+        self.assertEqual(self.keywords(xml, "Duck.amxd"), ["Creator|Animal Audio"])
+        self.assertEqual(self.keywords(xml, "Cosmos.amxd"), ["Creator|Animal Audio"])
+
+    def test_merge_keeps_user_tags_and_is_idempotent(self):
+        first = ip.tagged_sidecar(None, ["Duck.amxd"])
+        user = first.replace("<rdf:li>Creator|Animal Audio</rdf:li>",
+                             "<rdf:li>Creator|Animal Audio</rdf:li><rdf:li>Tags|Favourite</rdf:li>")
+        merged = ip.tagged_sidecar(user, ["Duck.amxd", "Parrot.amxd"])
+        self.assertEqual(self.keywords(merged, "Duck.amxd"), ["Creator|Animal Audio", "Tags|Favourite"])
+        self.assertEqual(self.keywords(merged, "Parrot.amxd"), ["Creator|Animal Audio"])
+        self.assertEqual(ip.tagged_sidecar(merged, ["Duck.amxd", "Parrot.amxd"]), merged)
+
+    def test_unreadable_sidecar_is_replaced(self):
+        self.assertEqual(self.keywords(ip.tagged_sidecar("not xml", ["Duck.amxd"]), "Duck.amxd"),
+                         ["Creator|Animal Audio"])
+
+    def test_install_copies_devices_by_type_and_writes_sidecars(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lib = Path(tmp) / "User Library"
+            code, out = run_main(["--m4l-only", "--user-library", str(lib)])
+            self.assertEqual(code, 0, out)
+            devices = ip.m4l_devices()
+            self.assertTrue(devices)
+            for device in devices:
+                folder = ip.m4l_folder(lib, device)
+                self.assertTrue((folder / device.name).is_file())
+                sidecar = (folder / ip.FOLDER_INFO / ip.FOLDER_XMP).read_text()
+                self.assertEqual(self.keywords(sidecar, device.name), ["Creator|Animal Audio"])
+            instruments = lib / "Presets" / "Instruments" / "Max Instrument" / "Animal Audio"
+            self.assertTrue(any(instruments.glob("*.amxd")), "Dolphin Flow is an instrument")
+            code, out = run_main(["--uninstall", "--prefix", str(Path(tmp) / "vst3"), "--user-library", str(lib)])
+            self.assertFalse(list(lib.rglob("*.amxd")), out)
+
+    def test_prefix_without_user_library_leaves_devices_alone(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(ip, "install_m4l") as install:
+            run_main(["--prefix", tmp])
+            install.assert_not_called()
+
+    def test_user_library_from_live_prefs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "Library.cfg"
+            cfg.write_text('<Ableton><ContentLibrary><UserLibrary><LibraryProject Id="0">'
+                           '<ProjectPath Value="/Volumes/Music/Ableton" /></LibraryProject></UserLibrary>'
+                           '</ContentLibrary></Ableton>')
+            with mock.patch.object(ip, "live_library_cfgs", return_value=[cfg]):
+                self.assertEqual(ip.user_library("macos"), Path("/Volumes/Music/Ableton/User Library"))
+
 
 if __name__ == "__main__":
     unittest.main()

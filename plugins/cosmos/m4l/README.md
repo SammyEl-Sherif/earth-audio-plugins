@@ -1,12 +1,14 @@
 # COSMOS for Max for Live (Push 3 standalone)
 
 `Cosmos.amxd` is a Max for Live audio effect port of the Cosmos VST3. Push 3 standalone can't load VST3s, but it
-can run Max for Live devices made of plain Max + gen~. This one has no externals and no JavaScript.
+can run Max for Live devices made of plain Max + gen~. This one has no externals; it's built on the shared M4L
+framework (`shared/m4l`), so it looks like the rest of the Animal Audio devices rather than the VST3.
 
 | File | What |
 | --- | --- |
 | `cosmos.genexpr` | The DSP. A GenExpr port of `Source/dsp` (CosmosEngine, PhraseLooper) plus the shared Svf and FdnReverb |
-| `build_amxd.py` | Builds `Cosmos.amxd`: the patcher, the Live parameters, the Push banks, and the codebox above |
+| `device.py` | The spec: Live parameters, Push banks, UI layout, gen~ monitors (looper state, position, length) |
+| `ui.js` | Cosmos's own widgets: mode family readout, looper display, REC/PLAY/DUB button |
 | `Cosmos.amxd` | The built device (checked in so you can use it without building) |
 
 ## Use it
@@ -26,7 +28,8 @@ Every control is a Live parameter, so Push's encoders and display pick them up. 
 | Time + FX | Time | Sync | Tempo | Repeats | Mod Freq | Mod Depth | Space | Reverb Time |
 | Looper | Rec/Play | Stop | Clear | Loop Level | Loop Rev | Pre-FX | FX Vol | |
 
-REC/PLAY works like the plugin's looper button: REC, then PLAY, then DUB, then back to PLAY.
+REC/PLAY works like the plugin's looper button: REC, then PLAY, then DUB, then back to PLAY. On the desktop the
+button shows what the next press does.
 
 ## Differences from the VST3
 
@@ -36,33 +39,11 @@ REC/PLAY works like the plugin's looper button: REC, then PLAY, then DUB, then b
   There is no TAP button. With SYNC off, use the Tempo knob.
 - In POST-FX looper mode, the looper hears the output one sample late.
 - The random sequences differ from the plugin's, so renders are not sample-identical.
-- The desktop device view shows the looper state. Push only shows the parameters.
+- The desktop device view shows the looper state, position and length. Push only shows the parameters.
 
 ## Change it
 
-Edit `cosmos.genexpr` or the layout and parameter tables in `build_amxd.py`, then run:
-
-```sh
-python3 plugins/cosmos/m4l/build_amxd.py          # rebuild Cosmos.amxd
-python3 plugins/cosmos/m4l/build_amxd.py --check  # fails if Cosmos.amxd is stale
-```
-
-Keep the GenExpr in step with `Source/dsp` when the engine changes. Parenthesize any expression that chains 3 or
-more operators of mixed precedence, for example `(a > b) && ((c - d) < e)`. GenExpr parsers don't all nest
-these the same way.
-
-Never pass a user function's result straight into `poke()` (or `Delay.write()`): assign it to a variable first.
-gen~'s type pass never types a user function nested inside `poke()`, so code generation fails with
-`gen2.dsp.Model:1455: assertion failed` and the whole device goes silent. That was the cause of the first
-"no audio" bug.
-
-Three more gen~ rules, each of which caused silence or a dead feature in Max even though the code looked fine:
-
-- Give every `Param` an explicit `min` and `max`. gen~ defaults a missing range to 0..1 and clamps to it, which
-  broke the looper buttons (counters past 1) and Live sync (tempo and beat position).
-- Keep integer literals below 2^31. gen~ emits them as C `int`, so `4294967296` became 0.
-- Don't pre-declare locals with a constant (`ticked = 0;` at the top, then set inside blocks). gen~'s constant
-  folding then treated `if (ticked)` as always false, and no grains ever spawned.
-
-The code also keeps a few conventions: no user function calls another or returns multiple values, and lookup
-tables live in the `tbl` Data (filled on the first sample).
+Edit `cosmos.genexpr`, `device.py` or `ui.js`, then rebuild with `scripts/build_m4l.py` (`python3
+scripts/build_m4l.py cosmos --preview` to also see the UI in a browser). Never rename a Live parameter: sets store
+values by name. Keep the GenExpr in step with `Source/dsp` when the engine changes, and follow the gen~ rules in
+[shared/m4l/README.md](../../../shared/m4l/README.md): each of them once silenced this device in Max.

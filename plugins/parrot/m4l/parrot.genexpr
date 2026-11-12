@@ -1,0 +1,906 @@
+// PARROT for Max for Live: a GenExpr port of plugins/parrot/Source/dsp (ParrotEngine, VoiceShifter) and the shared
+// PitchTracker and TubeDrive, for gen~ so it runs on Push 3 standalone. Keep in step with the C++ engine.
+//
+// in1/in2: audio L/R.
+// out1/out2: audio L/R. out3: input pitch (Hz, 0 unvoiced). out4: output pitch (Hz). out5: tube heat 0..1.
+//
+// Signal path, per sample:
+//   input -> history -> YIN pitch tracker (12 kHz, every 2.7 ms) -> pitch marks (cross-correlation aligned)
+//         -> TD-PSOLA grains (pitch ratio from SHIFT / SNAP / ROBOT, formant ratio by resampling each grain)
+//         -> level match (300 ms power follower, +-4 dB) -> two-stage 12AX7 drive -> drywet with the delayed dry
+// Differences from the VST3 (see README.md): 24 grain slots, cubic reads (the formant-up reads come from a copy of
+// the input low-passed at 0.47 sr / formant ratio) instead of the windowed-sinc reader, the drive is oversampled
+// 2x (47-tap halfband) instead of 4x, and the latency is one fixed budget (Live's Defined Latency is a constant):
+// above 48 kHz the lowest tracked pitch rises so the design still fits it.
+//
+// gen~ rules kept here (shared/m4l/README.md): no user function result straight into poke(), every Param has a
+// min and max, no flag set inside blocks after a constant init (state updates are ternaries), mixed-precedence
+// chains are parenthesized, every loop is bounded, user functions don't call each other.
+
+// ---------- pure helpers ----------
+
+catmull(y0, y1, y2, y3, t) {
+	c3 = ((-0.5 * y0) + (1.5 * y1)) - ((1.5 * y2) - (0.5 * y3));
+	c2 = (y0 - (2.5 * y1)) + ((2 * y2) - (0.5 * y3));
+	c1 = 0.5 * (y2 - y0);
+	return (((((c3 * t) + c2) * t) + c1) * t) + y1;
+}
+
+// Parabolic vertex offset through three points (PitchTracker::parabolicOffset).
+parab(l, m, r) {
+	den = (l - (2 * m)) + r;
+	off = clamp((0.5 * (l - r)) / max(den, 0.000000000001), -0.5, 0.5);
+	return off * (den > 0.000000000001);
+}
+
+// Depth of a YIN dip: the minimum of the parabola through it (PitchTracker::dipDepth).
+dipd(l, m, r) {
+	curv = (l - (2 * m)) + r;
+	deep = max(0, m - ((0.125 * ((l - r) * (l - r))) / max(curv, 0.000000000001)));
+	return deep + ((m - deep) * (curv <= 0.000000000001));
+}
+
+// Koren 12AX7 plate current (A); Cohen & Helie constants (dsp::KorenTriode).
+koren(vgk, vpk) {
+	inner = 464 * ((1 / 106) + ((vgk + 0.49) / sqrt(179 + (vpk * vpk))));
+	soft = (inner > 40) ? inner : log(1 + exp(min(inner, 40)));
+	e1 = (max(vpk, 0) / 464) * soft;
+	cur = (2 * pow(max(e1, 0), 1.46)) / 1572;
+	return ((vpk > 0) && (e1 > 0)) ? cur : 0;
+}
+
+// Grid-cathode voltage behind the 68k grid stopper for a source-minus-cathode voltage u (dsp::GridDiode, solved
+// in closed form: off below 0.35 - 0.5 V, quadratic knee, 1.3k above 0.35 + 0.5 V).
+gridv(u) {
+	ga = 1 / 2600;
+	gb = 0.15 / 1300;
+	gc = -((ga * 0.0225) - (gb * 0.15));
+	qa = 68000 * ga;
+	qb = 1 + (68000 * gb);
+	qc = (68000 * gc) - u;
+	knee = (-qb + sqrt(max(0, (qb * qb) - ((4 * qa) * qc)))) / (2 * qa);
+	ohm = (u + ((68000 * 0.35) / 1300)) / (1 + (68000 / 1300));
+	uhigh = 0.85 + ((68000 * 0.5) / 1300);
+	return (u <= -0.15) ? u : ((u < uhigh) ? knee : ohm);
+}
+
+// ---------- parameters (percent knobs arrive as 0..100) ----------
+
+Param pitch(0, min=-12, max=12);
+Param formant(0, min=-12, max=12);
+Param fine(0, min=0, max=1);
+Param link(0, min=0, max=1);
+Param mode(0, min=0, max=2);
+Param note(12, min=0, max=47);
+Param glide(0, min=0, max=500);
+Param drive(0, min=0, max=100);
+Param drywet(100, min=0, max=100);
+// The newest MIDI note held (device wiring: notein -> held-note stack), -1 when none.
+Param held(-1, min=-1, max=127);
+
+// ---------- state ----------
+
+Data aens(1);  // alignment window energy: a Data cell, not a constant-initialised local (gen~ folds those)
+Data hist(16384, 3);
+Data histf(16384, 2);
+Data fineb(4096);
+Data coarseb(1024);
+Data lin(4096);
+Data dif(256);
+Data nrm(256);
+Data rfv(64);
+Data est(128, 3);
+Data mk(1024, 3);
+Data grains(25, 8);
+Data fir(48);
+Data plate(2049);
+Data mkup(129);
+Data sfirst(256);
+Data osb(32, 6);
+Data cln(32, 2);
+Data tst(8, 2);
+
+History rz(0);
+History srh(48000);
+History wr(0);
+History firready(0);
+History tphase(0);
+History cw(0);
+History since(0);
+History tz1a(0);
+History tz2a(0);
+History tz1b(0);
+History tz2b(0);
+History curvoiced(0);
+History rp0(0);
+History rp1(0);
+History rp2(0);
+History rcount(0);
+History estcount(0);
+History fz1l(0);
+History fz2l(0);
+History fz3l(0);
+History fz4l(0);
+History fz1r(0);
+History fz2r(0);
+History fz3r(0);
+History fz4r(0);
+History markcount(0);
+History nextmark(0);
+History cursor(0);
+History nextsyn(0);
+History lastvoiced(0);
+History lastvsyn(-1000000000);
+History snaptgt(0);
+History snapcorr(0);
+History robotp(0);
+History freeslot(0);
+History inhzh(0);
+History outhzh(0);
+History inpow(0);
+History outpow(0);
+History lvl(1);
+History mixs(1);
+History tinit(0);
+History tidx(0);
+History tpass(0);
+History smeanh(0);
+History vk0(1);
+History ip0(0);
+History drvs(0);
+History wets(0);
+History stale(0);
+History heatenv(0);
+
+// ---------- constants ----------
+
+// @insert latency
+HN = 16384;
+NG = 24;
+sr = srh;  // through a History: gen~ hoists samplerate-only maths and then mis-scopes it in its C++
+srh = samplerate;
+
+if (firready < 0.5) {
+	// @insert fir
+	firready = 1;
+}
+
+// Pitch tracker design (PitchTracker::prepare, VoiceShifter::prepare). The longest period is capped so the
+// design fits the fixed latency LAT; that only bites above 48 kHz.
+D = max(1, round(sr / 12000));
+CR = sr / D;
+HOP = max(1, round(CR * 0.0027));
+PCAP = floor((((LAT - (2 * D)) - (HOP * D)) - 18) / 4.875);
+MAXLAG = max(16, min(ceil(CR / 75), floor(PCAP / D)));
+MINLAG = max(2, floor(CR / 1000));
+WIN = MAXLAG;
+SPAN = (2 * MAXLAG) + 2;
+MAXP = MAXLAG * D;
+CLAG = floor((SPAN * D) / 2) + D;
+MARKLAG = max((CLAG + (HOP * D)) - floor(MAXP / 2), floor(MAXP / 2) + 4);
+UNV = max(16, round(0.005 * sr));
+LEAD = max(1.25 * MAXP, UNV);
+SHORTEST = (sr / 1000) * 0.9;
+LONGEST = MAXP * 1.05;
+
+// ---------- controls (dsp::appliedPitch / appliedFormant) ----------
+
+// rz is a runtime 0 (a History): it keeps gen~ from hoisting these Param-only expressions, which it mis-scopes.
+fin = (fine + rz) > 0.5;
+ap = fin ? (pitch + rz) : round(pitch + rz);
+ownf = fin ? (formant + rz) : round(formant + rz);
+af = clamp(ownf + (((link + rz) > 0.5) ? ap : 0), -12, 12);
+beta = clamp(exp2(af / 12), 0.5, 2);
+md = clamp(round(mode + rz), 0, 2);
+notemidi = 36 + clamp(round(note + rz), 0, 47);
+glides = max(0, glide + rz) * 0.001;
+rz = 0;
+
+// ---------- input history (raw, and low-passed for formant-up reads) ----------
+
+n = wr;
+now = n - LAT;
+xl = in1;
+xr = in2;
+mono = (xl + xr) * 0.5;
+hs = wrap(n, 0, HN);
+poke(hist, xl, hs, 0);
+poke(hist, xr, hs, 1);
+poke(hist, mono, hs, 2);
+
+// 4th-order Butterworth at 0.47 sr / beta: the cutoff the VST3's sinc reader uses when it reads beta times faster.
+ffc = min((0.47 * sr) / max(beta, 1), 0.45 * sr);
+fw0 = (twopi * ffc) / sr;
+fcs = cos(fw0);
+fsn = sin(fw0);
+fal1 = fsn / (2 * 0.54119610);
+fn1 = 1 + fal1;
+fb0a = ((1 - fcs) * 0.5) / fn1;
+fb1a = (1 - fcs) / fn1;
+fa1a = (-2 * fcs) / fn1;
+fa2a = (1 - fal1) / fn1;
+fal2 = fsn / (2 * 1.30656296);
+fn2 = 1 + fal2;
+fb0b = ((1 - fcs) * 0.5) / fn2;
+fb1b = (1 - fcs) / fn2;
+fa1b = (-2 * fcs) / fn2;
+fa2b = (1 - fal2) / fn2;
+
+fyl = (fb0a * xl) + fz1l;
+fz1l = ((fb1a * xl) - (fa1a * fyl)) + fz2l;
+fz2l = (fb0a * xl) - (fa2a * fyl);
+fyl2 = (fb0b * fyl) + fz3l;
+fz3l = ((fb1b * fyl) - (fa1b * fyl2)) + fz4l;
+fz4l = (fb0b * fyl) - (fa2b * fyl2);
+fyr = (fb0a * xr) + fz1r;
+fz1r = ((fb1a * xr) - (fa1a * fyr)) + fz2r;
+fz2r = (fb0a * xr) - (fa2a * fyr);
+fyr2 = (fb0b * fyr) + fz3r;
+fz3r = ((fb1b * fyr) - (fa1b * fyr2)) + fz4r;
+fz4r = (fb0b * fyr) - (fa2b * fyr2);
+poke(histf, fyl2, hs, 0);
+poke(histf, fyr2, hs, 1);
+
+// ---------- pitch tracker: YIN on a 12 kHz copy, refined at the full rate (dsp::PitchTracker) ----------
+
+tfc = min(0.25 * CR, 0.45 * sr);
+tw0 = (twopi * tfc) / sr;
+tcs = cos(tw0);
+tsn = sin(tw0);
+tal1 = tsn / (2 * 0.54119610);
+tn1 = 1 + tal1;
+tb0a = ((1 - tcs) * 0.5) / tn1;
+tb1a = (1 - tcs) / tn1;
+ta1a = (-2 * tcs) / tn1;
+ta2a = (1 - tal1) / tn1;
+tal2 = tsn / (2 * 1.30656296);
+tn2 = 1 + tal2;
+tb0b = ((1 - tcs) * 0.5) / tn2;
+tb1b = (1 - tcs) / tn2;
+ta1b = (-2 * tcs) / tn2;
+ta2b = (1 - tal2) / tn2;
+
+ty = (tb0a * mono) + tz1a;
+tz1a = ((tb1a * mono) - (ta1a * ty)) + tz2a;
+tz2a = (tb0a * mono) - (ta2a * ty);
+ty2 = (tb0b * ty) + tz1b;
+tz1b = ((tb1b * ty) - (ta1b * ty2)) + tz2b;
+tz2b = (tb0b * ty) - (ta2b * ty2);
+poke(fineb, ty2, wrap(n, 0, 4096), 0);
+tracked = n + 1;
+
+tphase = tphase + 1;
+isdec = tphase >= D;
+if (isdec) {
+	tphase = 0;
+	poke(coarseb, ty2, wrap(cw, 0, 1024), 0);
+	cw = cw + 1;
+	since = since + 1;
+}
+doan = isdec && ((since >= HOP) && (cw >= SPAN));
+
+if (doan) {
+	since = 0;
+	astart = cw - SPAN;
+	energy = 0;
+	for (i = 0; i < SPAN; i += 1) {
+		cv = peek(coarseb, wrap(astart + i, 0, 1024), 0);
+		poke(lin, cv, i, 0);
+		energy += cv * cv;
+	}
+	rms = sqrt(energy / SPAN);
+
+	// Difference function and cumulative-mean normalisation.
+	for (tau = 1; tau <= (MAXLAG + 1); tau += 1) {
+		dsum = 0;
+		for (j = 0; j < WIN; j += 1) {
+			dd = peek(lin, j, 0) - peek(lin, j + tau, 0);
+			dsum += dd * dd;
+		}
+		poke(dif, dsum, tau, 0);
+	}
+	poke(nrm, 1, 0, 0);
+	running = 0;
+	for (tau = 1; tau <= (MAXLAG + 1); tau += 1) {
+		dv = peek(dif, tau, 0);
+		running += dv;
+		nv = (running > 0) ? ((dv * tau) / max(running, 0.0000000001)) : 1;
+		poke(nrm, nv, tau, 0);
+	}
+
+	// First dip under the threshold, then down to its local minimum; else the global minimum.
+	sst = 0;
+	sbest = MINLAG;
+	sbv = 2;
+	gbest = MINLAG;
+	gbv = peek(nrm, MINLAG, 0);
+	for (tau = MINLAG; tau <= MAXLAG; tau += 1) {
+		v = peek(nrm, tau, 0);
+		isstart = (sst < 0.5) && (v < 0.15);
+		indesc = (sst > 0.5) && (sst < 1.5);
+		isdesc = indesc && (v < sbv);
+		isstop = indesc && (v >= sbv);
+		sbest = (isstart || isdesc) ? tau : sbest;
+		sbv = (isstart || isdesc) ? v : sbv;
+		sst = isstart ? 1 : (isstop ? 2 : sst);
+		gbest = (v < gbv) ? tau : gbest;
+		gbv = min(v, gbv);
+	}
+	found = sst > 0.5;
+	lag = found ? sbest : gbest;
+
+	// periodBehindHarmonic: a multiple of the lag whose dip is less than half as deep is the period.
+	dipl = peek(nrm, lag - 1, 0);
+	dipm = peek(nrm, lag, 0);
+	dipr = peek(nrm, lag + 1, 0);
+	depth = dipd(dipl, dipm, dipr);
+	hgo = found && (depth >= 0.03);
+	hres = lag;
+	for (k = 2; k < 48; k += 1) {
+		inrange = hgo && (((k * lag) + k) < MAXLAG);
+		if (inrange) {
+			deepest = k * lag;
+			deepv = peek(nrm, deepest, 0);
+			hlo = max(MINLAG, (k * lag) - k);
+			hcount = ((k * lag) + k) - hlo;
+			for (q = 0; q <= hcount; q += 1) {
+				ht = hlo + q;
+				hv = peek(nrm, ht, 0);
+				deepest = (hv < deepv) ? ht : deepest;
+				deepv = min(hv, deepv);
+			}
+			harml = peek(nrm, deepest - 1, 0);
+			harmr = peek(nrm, deepest + 1, 0);
+			hd = dipd(harml, deepv, harmr);
+			hit = hd < (0.5 * depth);
+			hres = hit ? deepest : hres;
+			hgo = hit ? 0 : hgo;
+		}
+		hgo = inrange ? hgo : 0;
+	}
+	lag = hres;
+
+	aper = peek(nrm, lag, 0);
+	lagl = peek(nrm, lag - 1, 0);
+	lagr = peek(nrm, lag + 1, 0);
+	clagf = lag + parab(lagl, aper, lagr);
+	centre = ((astart + (SPAN / 2)) * D) + (D - 1);
+	period = clagf * D;
+
+	// Refine at the full rate over +-D lags around the coarse period.
+	rlow = max(2, floor(period) - D);
+	rhigh = ceil(period) + D;
+	rlen = WIN * D;
+	rneed = (rlen + rhigh) + 1;
+	dorefine = (D > 1) && (rneed <= min((SPAN + 4) * D, 4096));
+	if (dorefine) {
+		rfirst = min(centre - floor(rneed / 2), tracked - rneed);
+		for (i = 0; i < rneed; i += 1) {
+			fv = peek(fineb, wrap(rfirst + i, 0, 4096), 0);
+			poke(lin, fv, i, 0);
+		}
+		rlags = min((rhigh - rlow) + 1, 64);
+		rbest = 0;
+		rbv = 1000000000;
+		for (k = 0; k < rlags; k += 1) {
+			rtau = rlow + k;
+			rsum = 0;
+			for (j = 0; j < rlen; j += 1) {
+				dd = peek(lin, j, 0) - peek(lin, j + rtau, 0);
+				rsum += dd * dd;
+			}
+			poke(rfv, rsum, k, 0);
+			rbest = (rsum < rbv) ? k : rbest;
+			rbv = min(rsum, rbv);
+		}
+		redge = (rbest < 0.5) || (rbest > (rlags - 1.5));
+		rfvl = peek(rfv, max(rbest - 1, 0), 0);
+		rfvr = peek(rfv, min(rbest + 1, 63), 0);
+		rref = (rlow + rbest) + parab(rfvl, rbv, rfvr);
+		period = redge ? period : rref;
+	}
+
+	// Voicing (hysteresis) and a median of three against single-frame octave slips.
+	vthr = (curvoiced > 0.5) ? 0.35 : 0.25;
+	voiced = (rms > 0.002) && (aper < vthr);
+	if (voiced) {
+		rslot = rcount % 3;
+		rp0 = (rslot < 0.5) ? period : rp0;
+		rp1 = ((rslot > 0.5) && (rslot < 1.5)) ? period : rp1;
+		rp2 = (rslot > 1.5) ? period : rp2;
+		rcount = rcount + 1;
+		med = max(min(rp0, rp1), min(max(rp0, rp1), rp2));
+		period = (rcount >= 3) ? med : period;
+	} else {
+		rcount = 0;
+	}
+	curvoiced = voiced;
+	eslot = wrap(estcount, 0, 128);
+	poke(est, centre, eslot, 0);
+	poke(est, period, eslot, 1);
+	poke(est, voiced, eslot, 2);
+	estcount = estcount + 1;
+}
+
+// ---------- pitch marks: one per period, aligned to the previous by normalised cross-correlation ----------
+
+front = n - MARKLAG;
+for (it = 0; it < 2; it += 1) {
+	if (nextmark <= front) {
+		guess = nextmark;
+		gpos = round(guess);
+		ecount = estcount;
+		haveest = ecount > 0.5;
+		ebest = ecount - 1;
+		ebd = abs(peek(est, wrap(ebest, 0, 128), 0) - gpos);
+		eoldest = max(0, ecount - 128);
+		walk = haveest;
+		for (q = 0; q < 8; q += 1) {
+			ecand = ebest - 1;
+			eok = walk && (ecand >= eoldest);
+			ed = abs(peek(est, wrap(ecand, 0, 128), 0) - gpos);
+			ebetter = eok && (ed < ebd);
+			ebest = ebetter ? ecand : ebest;
+			ebd = ebetter ? ed : ebd;
+			walk = ebetter;
+		}
+		eslot2 = wrap(ebest, 0, 128);
+		eper = haveest ? peek(est, eslot2, 1) : 0;
+		evo = haveest && (peek(est, eslot2, 2) > 0.5);
+		mvoiced = evo && ((eper >= SHORTEST) && (eper <= LONGEST));
+		mper = mvoiced ? eper : UNV;
+		mpos = guess;
+
+		havep = markcount > 0.5;
+		pslot = wrap(markcount - 1, 0, 1024);
+		ppos = peek(mk, pslot, 0);
+		pper = peek(mk, pslot, 1);
+		pvo = havep && (peek(mk, pslot, 2) > 0.5);
+		cont = (mvoiced && pvo) && ((abs(pper - mper) < (0.2 * mper)) && ((guess - ppos) < (1.5 * mper)));
+		strong = mvoiced && (cont < 0.5);
+
+		if (cont) {
+			// alignToPrevious: whole-sample candidates within period / 8, parabolic peak, the previous fraction
+			// carried over so rounding never accumulates.
+			alen = max(2, round(mper));
+			arad = max(1, round(mper * 0.125));
+			anchor = round(ppos);
+			afrac = ppos - anchor;
+			acen = round(guess - afrac);
+			alow = max(acen - arad, anchor + floor(alen / 2));
+			ahigh = acen + arad;
+			if (alow <= ahigh) {
+				poke(aens, 0, 0, 0);
+				for (k = 0; k < alen; k += 1) {
+					ev = peek(hist, wrap((alow - alen) + k, 0, HN), 2);
+					aacc = peek(aens, 0, 0) + (ev * ev);
+					poke(aens, aacc, 0, 0);
+				}
+				abest = acen;
+				abestv = -1000000000;
+				abefore = 0;
+				aafter = 0;
+				aprev = 0;
+				acap = 0;
+				acount = min((ahigh - alow) + 1, 256);
+				for (c = 0; c < acount; c += 1) {
+					cand = alow + c;
+					cdot = 0;
+					for (k = 0; k < alen; k += 1) {
+						cdot += peek(hist, wrap((anchor - alen) + k, 0, HN), 2) * peek(hist, wrap((cand - alen) + k, 0, HN), 2);
+					}
+					aenv = peek(aens, 0, 0);
+					score = cdot / sqrt(aenv + 0.000000000001);
+					aafter = (acap > 0.5) ? score : aafter;
+					isb = score > abestv;
+					abestv = isb ? score : abestv;
+					abest = isb ? cand : abest;
+					abefore = isb ? ((cand > alow) ? aprev : score) : abefore;
+					aafter = isb ? score : aafter;
+					acap = isb;
+					aprev = score;
+					ain = peek(hist, wrap(cand, 0, HN), 2);
+					aout = peek(hist, wrap(cand - alen, 0, HN), 2);
+					anew = max(0, (aenv + (ain * ain)) - (aout * aout));
+					poke(aens, anew, 0, 0);
+				}
+				acurv = (abefore - (2 * abestv)) + aafter;
+				aoff = clamp((0.5 * (abefore - aafter)) / min(acurv, -0.000000000001), -0.5, 0.5);
+				mpos = (abest + ((acurv < 0) ? aoff : 0)) + afrac;
+			}
+		}
+		if (strong) {
+			// strongestNear: the largest sample within half a period, not before the previous mark.
+			shalf = max(1, round(mper * 0.5));
+			snot = havep ? (ppos + 1) : guess;
+			slow = max(gpos - shalf, ceil(snot));
+			shigh = gpos + shalf;
+			sbestm = max(gpos, slow);
+			slev = -1;
+			scount = min((shigh - slow) + 1, 1024);
+			for (k = 0; k < scount; k += 1) {
+				si = slow + k;
+				lv = abs(peek(hist, wrap(si, 0, HN), 2));
+				sbestm = (lv > slev) ? si : sbestm;
+				slev = max(lv, slev);
+			}
+			mpos = sbestm;
+		}
+
+		mslot = wrap(markcount, 0, 1024);
+		poke(mk, mpos, mslot, 0);
+		poke(mk, mper, mslot, 1);
+		poke(mk, mvoiced, mslot, 2);
+		markcount = markcount + 1;
+		nextmark = mpos + max(1, mper);
+	}
+}
+
+// ---------- grain launches (VoiceShifter::launchGrains): at most one jump and one grain per sample ----------
+
+lgo = markcount >= 0;
+for (it = 0; it < 2; it += 1) {
+	ts = nextsyn;
+	oldm = max(0, markcount - 1024);
+	cursor = max(cursor, oldm);
+	for (q = 0; q < 8; q += 1) {
+		cnx = cursor + 1;
+		adv = (cnx < markcount) && (peek(mk, wrap(cnx, 0, 1024), 0) <= ts);
+		cursor = adv ? cnx : cursor;
+	}
+	hasm = markcount > 0.5;
+	cpos = peek(mk, wrap(cursor, 0, 1024), 0);
+	npos = peek(mk, wrap(cursor + 1, 0, 1024), 0);
+	hasnext = (cursor + 1) < markcount;
+	chosen = (hasnext && ((npos - ts) < (ts - cpos))) ? (cursor + 1) : cursor;
+	cvo0 = hasm && (peek(mk, wrap(chosen, 0, 1024), 2) > 0.5);
+	entering = cvo0 && (lastvoiced < 0.5);
+	c2 = chosen + 1;
+	bump = (entering && (peek(mk, wrap(chosen, 0, 1024), 0) < ts)) && ((c2 < markcount) && (peek(mk, wrap(c2, 0, 1024), 2) > 0.5));
+	chosen = bump ? c2 : chosen;
+	chs = wrap(chosen, 0, 1024);
+	chpos = peek(mk, chs, 0);
+	cper = peek(mk, chs, 1);
+	cvo = hasm && (peek(mk, chs, 2) > 0.5);
+	jump = (lgo && entering) && (chpos >= ts);
+
+	// Asymmetric window reaching to the neighbouring marks.
+	pvv = (chosen > oldm) && (peek(mk, wrap(chosen - 1, 0, 1024), 2) > 0.5);
+	nvv = ((chosen + 1) < markcount) && (peek(mk, wrap(chosen + 1, 0, 1024), 2) > 0.5);
+	vleft = pvv ? clamp(chpos - peek(mk, wrap(chosen - 1, 0, 1024), 0), 0.75 * cper, 1.25 * cper) : cper;
+	vright = nvv ? clamp(peek(mk, wrap(chosen + 1, 0, 1024), 0) - chpos, 0.75 * cper, 1.25 * cper) : cper;
+
+	// The mode decides the pitch ratio (ParrotEngine::pitchRatio).
+	inpitch = sr / max(cper, 1);
+	inm = 69 + (12 * log2(inpitch / 440));
+	gapsec = (ts - lastvsyn) / sr;
+	fresh = gapsec > 0.08;
+	follow = (glides > 0) ? (1 - exp(-(gapsec / max(glides, 0.000001)))) : 1;
+	desired = inm + ap;
+	retarget = fresh || (abs(desired - snaptgt) > 0.6);
+	ntgt = retarget ? round(desired) : snaptgt;
+	corr = ntgt - desired;
+	ncorr = fresh ? corr : (snapcorr + ((corr - snapcorr) * follow));
+	rtarget = ((held > -0.5) ? held : notemidi) + ap;
+	nrob = fresh ? rtarget : (robotp + ((rtarget - robotp) * follow));
+	ratio = (md < 0.5) ? exp2(ap / 12) : ((md < 1.5) ? exp2((ap + ncorr) / 12) : exp2((nrob - inm) / 12));
+	alpha = clamp(ratio, 0.25, 4);
+
+	// meanSpacing: the mean of up to four neighbouring periods (avoids an integer-rounding pitch bias).
+	mlast = nvv ? (chosen + 1) : chosen;
+	mfirst = chosen;
+	for (q = 0; q < 4; q += 1) {
+		mback = ((mfirst > oldm) && ((mlast - mfirst) < 4)) && (peek(mk, wrap(mfirst - 1, 0, 1024), 2) > 0.5);
+		mfirst = mback ? (mfirst - 1) : mfirst;
+	}
+	mmean = (peek(mk, wrap(mlast, 0, 1024), 0) - peek(mk, wrap(mfirst, 0, 1024), 0)) / max(1, mlast - mfirst);
+	mspace = (mlast > mfirst) ? clamp(mmean, 0.75 * cper, 1.25 * cper) : cper;
+
+	gleft = cvo ? vleft : UNV;
+	gright = cvo ? vright : UNV;
+	gsrc = cvo ? chpos : ts;
+	ggain = cvo ? sqrt(beta / alpha) : 1;
+	gstep = cvo ? (((abs(alpha - 1) < 0.000001) ? vright : mspace) / alpha) : (UNV / beta);
+	late = (ts - (gleft / beta)) < (now - 1);
+	gleft = late ? max(1, (ts - now) * beta) : gleft;
+	due = (ts - (LEAD / beta)) <= now;
+	launch = (lgo && (jump < 0.5)) && due;
+	vlaunch = launch && cvo;
+
+	slot = launch ? freeslot : NG;
+	gfilt = beta > 1.0001;
+	ginvl = beta / gleft;
+	ginvr = beta / gright;
+	poke(grains, 1, slot, 0);
+	poke(grains, gsrc, slot, 1);
+	poke(grains, ts, slot, 2);
+	poke(grains, beta, slot, 3);
+	poke(grains, ginvl, slot, 4);
+	poke(grains, ginvr, slot, 5);
+	poke(grains, ggain, slot, 6);
+	poke(grains, gfilt, slot, 7);
+	freeslot = launch ? NG : freeslot;
+
+	snapmode = vlaunch && ((md > 0.5) && (md < 1.5));
+	snaptgt = snapmode ? ntgt : snaptgt;
+	snapcorr = snapmode ? ncorr : snapcorr;
+	robotp = (vlaunch && (md > 1.5)) ? nrob : robotp;
+	lastvsyn = vlaunch ? ts : lastvsyn;
+	inhzh = launch ? (cvo ? inpitch : 0) : inhzh;
+	outhzh = launch ? (cvo ? (inpitch * alpha) : 0) : outhzh;
+	nextsyn = jump ? chpos : (launch ? (ts + gstep) : nextsyn);
+	lastvoiced = jump ? 1 : (launch ? cvo : lastvoiced);
+	lgo = jump;
+}
+
+// ---------- grains: Hann windows (asymmetric), each read beta times faster around its source mark ----------
+
+wetl = 0;
+wetr = 0;
+nfree = NG;
+for (g = 0; g < NG; g += 1) {
+	if (peek(grains, g, 0) > 0.5) {
+		gdt = now - peek(grains, g, 2);
+		gu = gdt * ((gdt < 0) ? peek(grains, g, 4) : peek(grains, g, 5));
+		if (gu >= 1) {
+			poke(grains, 0, g, 0);
+		} else if (gu > -1) {
+			gw = (0.5 + (0.5 * cos(pi * abs(gu)))) * peek(grains, g, 6);
+			rpos = peek(grains, g, 1) + (peek(grains, g, 3) * gdt);
+			rfl = floor(rpos);
+			rft = rpos - rfl;
+			r1 = wrap(rfl, 0, HN);
+			r0 = wrap(r1 - 1, 0, HN);
+			r2 = wrap(r1 + 1, 0, HN);
+			r3 = wrap(r1 + 2, 0, HN);
+			if (peek(grains, g, 7) > 0.5) {
+				gsl = catmull(peek(histf, r0, 0), peek(histf, r1, 0), peek(histf, r2, 0), peek(histf, r3, 0), rft);
+				gsr = catmull(peek(histf, r0, 1), peek(histf, r1, 1), peek(histf, r2, 1), peek(histf, r3, 1), rft);
+				wetl += gw * gsl;
+				wetr += gw * gsr;
+			} else {
+				hsl = catmull(peek(hist, r0, 0), peek(hist, r1, 0), peek(hist, r2, 0), peek(hist, r3, 0), rft);
+				hsr = catmull(peek(hist, r0, 1), peek(hist, r1, 1), peek(hist, r2, 1), peek(hist, r3, 1), rft);
+				wetl += gw * hsl;
+				wetr += gw * hsr;
+			}
+		}
+	}
+	isfree = peek(grains, g, 0) < 0.5;
+	nfree = (isfree && (nfree > (NG - 0.5))) ? g : nfree;
+}
+freeslot = nfree;
+
+// ---------- level match: follow the latency-aligned input's power slowly, within +-4 dB ----------
+
+als = wrap(n - LAT, 0, HN);
+refl = peek(hist, als, 0);
+refr = peek(hist, als, 1);
+refp = (refl * refl) + (refr * refr);
+outp = (wetl * wetl) + (wetr * wetr);
+lc = exp(-1 / (0.3 * sr));
+inpow = refp + (lc * (inpow - refp));
+outpow = outp + (lc * (outpow - outp));
+lvt = clamp(sqrt((inpow + 0.0000001) / (outpow + 0.0000001)), 0.63, 1.58);
+lvc = exp(-1 / (0.02 * sr));
+lvl = lvt + (lvc * (lvl - lvt));
+lvl = (abs(lvl - lvt) < 0.00002) ? lvt : lvl;
+wl = wetl * lvl;
+wr2 = wetr * lvl;
+
+// ---------- drive: two cascaded 12AX7 stages (dsp::TubeDrive), 2x oversampled ----------
+// The plate load line and the makeup gains are solved once, a little per sample after load (~50 ms).
+
+if (tinit < 0.5) {
+	// Quiescent point: ip = Ia(-Rk ip, Vs - (Rp + Rk) ip).
+	blo = 0;
+	bhi = 250 / 101500;
+	for (k = 0; k < 60; k += 1) {
+		bmid = 0.5 * (blo + bhi);
+		bf = bmid - koren(-1500 * bmid, 250 - (101500 * bmid));
+		bhi = (bf > 0) ? bmid : bhi;
+		blo = (bf > 0) ? blo : bmid;
+	}
+	vk0 = 1500 * (0.5 * (blo + bhi));
+	tinit = 1;
+	tidx = 0;
+} else if (tinit < 1.5) {
+	// Plate current on the 100k load line for vgk in -40..12 V (2048 steps), one entry per sample.
+	pvgk = -40 + ((52 * tidx) / 2048);
+	psup = 250 - vk0;
+	blo = 0;
+	bhi = psup / 100000;
+	for (k = 0; k < 40; k += 1) {
+		bmid = 0.5 * (blo + bhi);
+		bf = bmid - koren(pvgk, psup - (100000 * bmid));
+		bhi = (bf > 0) ? bmid : bhi;
+		blo = (bf > 0) ? blo : bmid;
+	}
+	pval = 0.5 * (blo + bhi);
+	poke(plate, pval, tidx, 0);
+	tidx = tidx + 1;
+	if (tidx > 2048.5) {
+		qi = (40 - vk0) * (2048 / 52);
+		qi0 = clamp(floor(qi), 0, 2047);
+		qt = clamp(qi - qi0, 0, 1);
+		ip0 = peek(plate, qi0, 0) + (qt * (peek(plate, qi0 + 1, 0) - peek(plate, qi0, 0)));
+		tinit = 2;
+		tidx = 0;
+		tpass = 0;
+	}
+} else if (tinit < 2.5) {
+	// Makeup: 1 / (RMS out / RMS in) of the static two-stage curve for a -12 dBFS sine, per drive step.
+	mvolts = 0.3 * pow(10, (2.5 * tidx) / 128);
+	if (tpass < 0.5) {
+		smean = 0;
+		for (k = 0; k < 256; k += 1) {
+			sx = (mvolts * 0.25) * sin((twopi * k) / 256);
+			su = sx - vk0;
+			svg = gridv(su);
+			spi = clamp((svg + 40) * (2048 / 52), 0, 2048);
+			spi0 = min(floor(spi), 2047);
+			spt = spi - spi0;
+			sip = peek(plate, spi0, 0) + (spt * (peek(plate, spi0 + 1, 0) - peek(plate, spi0, 0)));
+			sout = -100000 * (sip - ip0);
+			poke(sfirst, sout, k, 0);
+			smean += sout / 256;
+		}
+		smeanh = smean;
+		tpass = 1;
+	} else {
+		ss1 = 0;
+		ss2 = 0;
+		for (k = 0; k < 256; k += 1) {
+			su = ((peek(sfirst, k, 0) - smeanh) / 40) - vk0;
+			svg = gridv(su);
+			spi = clamp((svg + 40) * (2048 / 52), 0, 2048);
+			spi0 = min(floor(spi), 2047);
+			spt = spi - spi0;
+			sip = peek(plate, spi0, 0) + (spt * (peek(plate, spi0 + 1, 0) - peek(plate, spi0, 0)));
+			sout = -100000 * (sip - ip0);
+			ss1 += sout;
+			ss2 += sout * sout;
+		}
+		smean2 = ss1 / 256;
+		spow = max(0, (ss2 / 256) - (smean2 * smean2));
+		slevel = sqrt(spow) / (0.25 / sqrt2);
+		mval = 1 / max(slevel, 0.000000001);
+		poke(mkup, mval, tidx, 0);
+		tidx = tidx + 1;
+		tpass = 0;
+		if (tidx > 128.5) {
+			tinit = 3;
+		}
+	}
+}
+
+ready = tinit > 2.5;
+damt = clamp(drive * 0.01, 0, 1);
+dsc = exp(-1 / (0.025 * sr));
+drvs = damt + (dsc * (drvs - damt));
+drvs = (abs(drvs - damt) < 0.00002) ? damt : drvs;
+wett = (ready && (damt > 0.0005)) ? 1 : 0;
+wsc = exp(-1 / (0.015 * sr));
+wets = wett + (wsc * (wets - wett));
+wets = (abs(wets - wett) < 0.00002) ? wett : wets;
+dactive = (wets > 0) || (wett > 0);
+
+xi = wrap(n, 0, 32);
+poke(cln, wl, xi, 0);
+poke(cln, wr2, xi, 1);
+cxi = wrap(n - DLAT, 0, 32);
+dl = peek(cln, cxi, 0);
+dr = peek(cln, cxi, 1);
+hdec = exp(-1 / (0.15 * sr));
+heatenv = heatenv * hdec;
+
+if (dactive) {
+	stale = 0;
+	volts = 0.3 * pow(10, 2.5 * drvs);
+	mi = drvs * 128;
+	mi0 = min(floor(mi), 127);
+	mgain = peek(mkup, mi0, 0) + ((mi - mi0) * (peek(mkup, mi0 + 1, 0) - peek(mkup, mi0, 0)));
+	cstep = 1 / ((2 * sr) * 0.000022);
+	ccoef = exp((-twopi * 7.2) / (2 * sr));
+	dcc = exp((-twopi * 10) / sr);
+	for (ch = 0; ch < 2; ch += 1) {
+		xs = ((ch < 0.5) ? wl : wr2) * volts;
+		poke(osb, xs, xi, ch);
+		// Upsample: even phase = the even taps, odd phase = the centre tap.
+		u0 = 0;
+		for (j = 0; j < 24; j += 1) {
+			u0 += peek(fir, 2 * j, 0) * peek(osb, wrap(n - j, 0, 32), ch);
+		}
+		u0 = 2 * u0;
+		u1 = (2 * peek(fir, 23, 0)) * peek(osb, wrap(n - 11, 0, 32), ch);
+		heatenv = max(heatenv, max(abs(u0), abs(u1)));
+		k0 = peek(tst, 0, ch);
+		k1 = peek(tst, 1, ch);
+		cplin = peek(tst, 2, ch);
+		cplout = peek(tst, 3, ch);
+		v0o = 0;
+		v1o = 0;
+		for (p = 0; p < 2; p += 1) {
+			src = (p < 0.5) ? u0 : u1;
+			// stage 1
+			su1 = src - k0;
+			vg1 = gridv(su1);
+			pi1 = clamp((vg1 + 40) * (2048 / 52), 0, 2048);
+			pi10 = min(floor(pi1), 2047);
+			ip1 = peek(plate, pi10, 0) + ((pi1 - pi10) * (peek(plate, pi10 + 1, 0) - peek(plate, pi10, 0)));
+			k0 = clamp(k0 + (cstep * ((ip1 + ((su1 - vg1) / 68000)) - (k0 / 1500))), 0, 50);
+			st1 = -100000 * (ip1 - ip0);
+			coupled = ccoef * ((cplout + st1) - cplin);
+			cplin = st1;
+			cplout = coupled;
+			// stage 2
+			su2 = (coupled / 40) - k1;
+			vg2 = gridv(su2);
+			pi2 = clamp((vg2 + 40) * (2048 / 52), 0, 2048);
+			pi20 = min(floor(pi2), 2047);
+			ip2 = peek(plate, pi20, 0) + ((pi2 - pi20) * (peek(plate, pi20 + 1, 0) - peek(plate, pi20, 0)));
+			k1 = clamp(k1 + (cstep * ((ip2 + ((su2 - vg2) / 68000)) - (k1 / 1500))), 0, 50);
+			st2 = -100000 * (ip2 - ip0);
+			v0o = (p < 0.5) ? st2 : v0o;
+			v1o = (p > 0.5) ? st2 : v1o;
+		}
+		poke(tst, k0, 0, ch);
+		poke(tst, k1, 1, ch);
+		poke(tst, cplin, 2, ch);
+		poke(tst, cplout, 3, ch);
+		poke(osb, v0o, xi, 2 + ch);
+		poke(osb, v1o, xi, 4 + ch);
+		// Downsample at the even phase, so up + down is a whole number of base-rate samples (DLAT).
+		yd = peek(fir, 23, 0) * peek(osb, wrap(n - 12, 0, 32), 4 + ch);
+		for (j = 0; j < 24; j += 1) {
+			yd += peek(fir, 2 * j, 0) * peek(osb, wrap(n - j, 0, 32), 2 + ch);
+		}
+		dcin = peek(tst, 4, ch);
+		dcout = peek(tst, 5, ch);
+		blocked = dcc * ((dcout + yd) - dcin);
+		poke(tst, yd, 4, ch);
+		poke(tst, blocked, 5, ch);
+		clean = (ch < 0.5) ? dl : dr;
+		res = clean + (wets * ((blocked * mgain) - clean));
+		dl = (ch < 0.5) ? res : dl;
+		dr = (ch > 0.5) ? res : dr;
+	}
+} else {
+	if (stale < 0.5) {
+		for (ch = 0; ch < 2; ch += 1) {
+			poke(tst, vk0, 0, ch);
+			poke(tst, vk0, 1, ch);
+			poke(tst, 0, 2, ch);
+			poke(tst, 0, 3, ch);
+			poke(tst, 0, 4, ch);
+			poke(tst, 0, 5, ch);
+		}
+		for (j = 0; j < 32; j += 1) {
+			for (ch = 0; ch < 6; ch += 1) {
+				poke(osb, 0, j, ch);
+			}
+		}
+		stale = 1;
+	}
+}
+
+onset = max(0.01, vk0 - 0.15);
+heat = dactive ? (clamp(log2(1 + (heatenv / onset)) * 0.5, 0, 1) * wets) : 0;
+
+// ---------- drywet with the dry signal delayed by the full latency ----------
+
+dryi = wrap((n - LAT) - DLAT, 0, HN);
+dryl = peek(hist, dryi, 0);
+dryr = peek(hist, dryi, 1);
+mixt = clamp(drywet * 0.01, 0, 1);
+msc = exp(-1 / (0.015 * sr));
+mixs = mixt + (msc * (mixs - mixt));
+mixs = (abs(mixs - mixt) < 0.00002) ? mixt : mixs;
+
+wr = n + 1;
+
+out1 = dryl + (mixs * (dl - dryl));
+out2 = dryr + (mixs * (dr - dryr));
+out3 = inhzh;
+out4 = outhzh;
+out5 = heat;
