@@ -33,8 +33,9 @@ BUMPS = ("auto", "patch", "minor", "major", "current")
 _LEVEL = {"patch": 1, "minor": 2, "major": 3}
 _CONVENTIONAL = re.compile(r"^(?P<type>[a-zA-Z]+)(?:\([^)]*\))?(?P<breaking>!)?:\s")
 _TYPE_BUMP = {"feat": "minor", "fix": "patch", "bugfix": "patch", "perf": "patch"}
-# Paths (besides plugins/<slug>/) whose changes ship inside every plugin binary; test helpers do not ship.
-SHARED_PATHS = ("shared", "cmake", "CMakeLists.txt", ":(exclude)shared/testing")
+# Paths (besides plugins/<slug>/) whose changes ship inside every plugin binary; test helpers and the Max for Live
+# devices (shared/m4l, plugins/<slug>/m4l: separate .amxd files, not in the VST3) do not ship.
+SHARED_PATHS = ("shared", "cmake", "CMakeLists.txt", ":(exclude)shared/testing", ":(exclude)shared/m4l")
 
 
 @dataclass(frozen=True)
@@ -103,7 +104,8 @@ def latest_tag(slug: str, *, cwd: Path) -> tuple[str, str] | None:
 
 
 def commits_since(tag: str, slug: str, *, ref: str, cwd: Path) -> list[Commit]:
-    out = git("log", "--format=%H%x1f%s%x1f%b%x1e", f"{tag}..{ref}", "--", f"plugins/{slug}", *SHARED_PATHS, cwd=cwd)
+    out = git("log", "--format=%H%x1f%s%x1f%b%x1e", f"{tag}..{ref}", "--", f"plugins/{slug}",
+              f":(exclude)plugins/{slug}/m4l", *SHARED_PATHS, cwd=cwd)
     commits = []
     for record in out.split("\x1e"):
         record = record.strip("\n")

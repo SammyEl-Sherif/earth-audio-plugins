@@ -10,6 +10,7 @@ and it is meant to be usable by hand too:
     python3 scripts/install_plugins.py --list                  # every copy on this machine, with its build stamp
     python3 scripts/install_plugins.py --uninstall             # remove every Animal Audio plugin
     python3 scripts/install_plugins.py --dry-run ...           # show what would happen, change nothing
+    python3 scripts/install_plugins.py --m4l-only              # just the Max for Live devices (no build needed)
 
 Where plugins go (default): macOS ~/Library/Audio/Plug-Ins/VST3, Linux ~/.vst3, Windows
 %COMMONPROGRAMFILES%\\VST3 when run as administrator, else %LOCALAPPDATA%\\Programs\\Common\\VST3.
@@ -18,6 +19,12 @@ Copies of the same plugin in the other standard folders are stale (a host may lo
 removed unless `--keep-stale`. Each installed bundle's build stamp (version, git SHA, date: embedded by
 cmake/GenerateBuildInfo.cmake) is read from the binary and printed, so you can compare it with what the plugin
 UI shows (hover the ANIMAL AUDIO badge, or read the small text at the bottom of the left panel).
+
+The Max for Live devices (plugins/*/m4l/*.amxd, checked in) are installed too, into Live's User Library under
+Presets/<Audio Effects|Instruments|MIDI Effects>/<Max ...>/Animal Audio, with a Live 12 tag sidecar that files them
+under the browser tag Creator > Animal Audio. Live gives the VST3s that same tag itself, from their vendor name.
+The User Library is read from Live's Library.cfg (`--user-library` overrides; `--no-m4l` skips). With `--prefix`
+(testing) the devices are skipped unless `--user-library` is given.
 """
 from __future__ import annotations
 
@@ -29,6 +36,7 @@ import re
 import shutil
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional
@@ -220,6 +228,168 @@ class Runner:
         if destination.exists():
             shutil.rmtree(destination) if destination.is_dir() else destination.unlink()
         staging.rename(destination)
+
+
+    def copy_file(self, source: Path, destination: Path) -> None:
+        self.step(f"copy {source} -> {destination}")
+        if self.dry_run:
+            return
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+
+    def write_text(self, path: Path, text: str) -> None:
+        self.step(f"write {path}")
+        if self.dry_run:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+
+# ---------------------------------------------------------------- Max for Live devices + Live browser tag
+
+ABLETON_TAG = "Creator|Animal Audio"  # the tag Live 12 gives the VST3s from their vendor name
+FOLDER_INFO = "Ableton Folder Info"
+FOLDER_XMP = "dc66a3fa-0fe1-5352-91cf-3ec237e9ee90.xmp"  # the name Live uses for a folder's tag sidecar
+M4L_FOLDERS = {
+    b"aaaa": ("Audio Effects", "Max Audio Effect"),
+    b"iiii": ("Instruments", "Max Instrument"),
+    b"mmmm": ("MIDI Effects", "Max MIDI Effect"),
+}
+XMP_NS = {
+    "x": "adobe:ns:meta/",
+    "rdf": "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
+    "dc": "http://purl.org/dc/elements/1.1/",
+    "ablFR": "https://ns.ableton.com/xmp/fs-resources/1.0/",
+    "xmp": "http://ns.adobe.com/xap/1.0/",
+}
+for _prefix, _uri in XMP_NS.items():
+    ET.register_namespace(_prefix, _uri)
+
+
+def m4l_devices(only: Optional[set[str]] = None) -> list[Path]:
+    devices = sorted(ROOT.glob("plugins/*/m4l/*.amxd"))
+    return [d for d in devices if not only or d.parent.parent.name.lower() in only or d.stem.lower() in only]
+
+
+def live_library_cfgs(os_name: str) -> list[Path]:
+    if os_name == "macos":
+        base = Path.home() / "Library" / "Preferences" / "Ableton"
+        return list(base.glob("Live */Library.cfg"))
+    if os_name == "windows":
+        base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / "Ableton"
+        return list(base.glob("Live */Preferences/Library.cfg"))
+    return []
+
+
+def user_library(os_name: str, override: Optional[str] = None) -> Optional[Path]:
+    """Live's User Library: from the newest Live's Library.cfg, else the default location."""
+    if override:
+        return Path(override).expanduser()
+    cfgs = sorted(live_library_cfgs(os_name), key=lambda p: p.stat().st_mtime, reverse=True)
+    for cfg in cfgs:
+        text = cfg.read_text(encoding="utf-8", errors="replace")
+        match = re.search(r"<UserLibrary>.*?<ProjectPath Value=\"([^\"]+)\"", text, re.S)
+        if match:
+            return Path(match.group(1)) / "User Library"
+    if os_name == "macos":
+        return Path.home() / "Music" / "Ableton" / "User Library"
+    if os_name == "windows":
+        return Path.home() / "Documents" / "Ableton" / "User Library"
+    return None
+
+
+def m4l_folder(library: Path, device: Path) -> Path:
+    category, subfolder = M4L_FOLDERS.get(device.read_bytes()[8:12], M4L_FOLDERS[b"aaaa"])
+    return library / "Presets" / category / subfolder / "Animal Audio"
+
+
+def tagged_sidecar(existing: Optional[str], names: Iterable[str], tag: str = ABLETON_TAG) -> str:
+    """The folder's Live tag sidecar with `tag` on every file in `names`, keeping whatever else it holds
+    (tags or colours the user added in Live)."""
+    def q(prefix: str, name: str) -> str:
+        return f"{{{XMP_NS[prefix]}}}{name}"
+
+    root = None
+    if existing:
+        try:
+            root = ET.fromstring(existing)
+        except ET.ParseError:
+            root = None
+    if root is None:
+        root = ET.Element(q("x", "xmpmeta"))
+        desc = ET.SubElement(ET.SubElement(root, q("rdf", "RDF")), q("rdf", "Description"), {q("rdf", "about"): ""})
+        ET.SubElement(desc, q("dc", "format")).text = "application/vnd.ableton.folder"
+        ET.SubElement(desc, q("ablFR", "resource")).text = "folder"
+        ET.SubElement(desc, q("xmp", "CreatorTool")).text = "Animal Audio"
+    desc = root.find("rdf:RDF/rdf:Description", XMP_NS)
+    items = desc.find("ablFR:items", XMP_NS)
+    if items is None:
+        items = ET.Element(q("ablFR", "items"))
+        desc.insert(2, items)
+    bag = items.find("rdf:Bag", XMP_NS)
+    if bag is None:
+        bag = ET.SubElement(items, q("rdf", "Bag"))
+
+    entries = {}
+    for li in bag.findall("rdf:li", XMP_NS):
+        path = li.find("ablFR:filePath", XMP_NS)
+        if path is not None and path.text:
+            entries[path.text] = li
+    for name in names:
+        li = entries.get(name)
+        if li is None:
+            li = ET.SubElement(bag, q("rdf", "li"), {q("rdf", "parseType"): "Resource"})
+            ET.SubElement(li, q("ablFR", "filePath")).text = name
+        keywords = li.find("ablFR:keywords", XMP_NS)
+        if keywords is None:
+            keywords = ET.SubElement(li, q("ablFR", "keywords"))
+        kbag = keywords.find("rdf:Bag", XMP_NS)
+        if kbag is None:
+            kbag = ET.SubElement(keywords, q("rdf", "Bag"))
+        if tag not in [k.text for k in kbag.findall("rdf:li", XMP_NS)]:
+            ET.SubElement(kbag, q("rdf", "li")).text = tag
+    ET.indent(root, space="    ")
+    xml = ET.tostring(root, encoding="unicode")
+    # ElementTree declares every namespace on the root; put them where Live writes them.
+    xml = re.sub(r"^<x:xmpmeta[^>]*>", '<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="XMP Core 6.0.0">', xml)
+    xml = xml.replace("<rdf:RDF>", f'<rdf:RDF xmlns:rdf="{XMP_NS["rdf"]}">', 1)
+    xml = re.sub(r'<rdf:Description rdf:about="">',
+                 '<rdf:Description rdf:about=""\n                xmlns:dc="{dc}"\n                xmlns:ablFR="{ablFR}"\n'
+                 '                xmlns:xmp="{xmp}">'.format(**XMP_NS), xml, count=1)
+    return xml + "\n"
+
+
+def install_m4l(args, runner: Runner, os_name: str) -> int:
+    only = {n.strip().lower() for n in args.only.split(",")} if args.only else None
+    devices = m4l_devices(only)
+    if not devices:
+        return 0
+    library = user_library(os_name, args.user_library)
+    if library is None:
+        runner.say("No Ableton User Library on this OS; skipping the Max for Live devices.")
+        return 0
+    if not library.is_dir() and not args.user_library:
+        runner.say(f"warning: Ableton User Library not found at {library}; skipping the Max for Live devices "
+                   "(pass --user-library)")
+        return 0
+    runner.say(f"\nInstalling {len(devices)} Max for Live device(s) into {library}, tagged {ABLETON_TAG}")
+    by_folder: dict[Path, list[str]] = {}
+    for device in devices:
+        folder = m4l_folder(library, device)
+        runner.copy_file(device, folder / device.name)
+        by_folder.setdefault(folder, []).append(device.name)
+    for folder, names in by_folder.items():
+        sidecar = folder / FOLDER_INFO / FOLDER_XMP
+        existing = sidecar.read_text(encoding="utf-8", errors="replace") if sidecar.exists() else None
+        runner.write_text(sidecar, tagged_sidecar(existing, names))
+    return 1 if runner.errors else 0
+
+
+def installed_m4l(library: Optional[Path]) -> list[Path]:
+    if library is None:
+        return []
+    return [library / "Presets" / c / s / "Animal Audio" for c, s in M4L_FOLDERS.values()
+            if (library / "Presets" / c / s / "Animal Audio").is_dir()]
 
 
 # ---------------------------------------------------------------- prerequisites
@@ -420,9 +590,16 @@ def do_uninstall(args, runner: Runner, os_name: str) -> int:
         only = {p.strip().lower() for p in args.only.split(",") if p.strip()}
         names = [n for n in names if n.replace(" Local", "").lower() in only]
     copies = installed_copies(dirs, names)
+    if not args.no_m4l and (not args.prefix or args.user_library):
+        library = user_library(os_name, args.user_library)
+        for folder in installed_m4l(library):
+            for device in sorted(folder.glob("*.amxd")):
+                if not getattr(args, "only", None) or device.stem.lower() in args.only.lower().split(","):
+                    runner.say(f"- {device.name} (Max for Live, {folder})")
+                    runner.remove(device)
     if not copies:
         runner.say("No Animal Audio plugins found in the VST3 folders: " + ", ".join(str(d) for d in dirs))
-        return 0
+        return 1 if runner.errors else 0
     for copy in copies:
         runner.say(f"- {copy.name} ({read_stamp(copy) or 'no build stamp'})")
         runner.remove(copy)
@@ -441,6 +618,12 @@ def do_list(args, runner: Runner, os_name: str) -> int:
         stamp = read_stamp(copy)
         mark = "" if (stamp and head and stamp.sha.startswith(head)) else "   <- not this checkout's commit"
         runner.say(f"  {copy}\n      build stamp: {stamp if stamp else 'none (built before build stamps existed)'}{mark}")
+    if not args.prefix or args.user_library:
+        devices = [d for f in installed_m4l(user_library(os_name, args.user_library)) for d in sorted(f.glob("*.amxd"))]
+        if devices:
+            runner.say(f"Max for Live devices (tag {ABLETON_TAG}):")
+            for device in devices:
+                runner.say(f"  {device}")
     if len({c.name for c in copies}) != len(copies):
         runner.say("\nwarning: the same plugin is installed in more than one folder; remove the stale one(s) "
                    "(re-run the install, which removes them).")
@@ -453,6 +636,7 @@ Next, in Ableton Live:
   2. Click "Rescan". If a plugin does not appear (or still looks old), hold Alt (Windows) / Option (macOS) while
      clicking Rescan for a full rescan. Quit and reopen Live if it still shows the old build.
   3. Find the plugins under Plug-Ins > VST3 (category: Animal Audio), drop one on an audio track and test it.
+     Everything (VST3s and Max for Live devices) is also under the browser tag Creator > Animal Audio.
   4. Verify the build: hover the ANIMAL AUDIO badge in the plugin UI (or read the small text at the bottom of the
      left panel). It must match the build stamp printed above.
 """
@@ -479,6 +663,10 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p.add_argument("--keep-stale", action="store_true", help="do not remove copies from the other VST3 folders")
     p.add_argument("--yes", "-y", action="store_true", help="do not ask questions")
     p.add_argument("--dry-run", action="store_true", help="print what would happen, change nothing")
+    p.add_argument("--user-library", help="Ableton User Library for the Max for Live devices (default: from Live's prefs)")
+    m4l = p.add_mutually_exclusive_group()
+    m4l.add_argument("--no-m4l", action="store_true", help="skip the Max for Live devices")
+    m4l.add_argument("--m4l-only", action="store_true", help="only install the Max for Live devices (no VST3s)")
     return p.parse_args(argv)
 
 
@@ -504,10 +692,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.uninstall:
         return do_uninstall(args, runner, os_name)
 
+    if args.m4l_only:
+        return install_m4l(args, runner, os_name)
     if args.build:
         only = {n.lower() for n in args.only.split(",")} if args.only else None
         build_all(runner, Path(args.build_dir), args.clean, only, args.universal, os_name)
     status = do_install(args, runner, os_name)
+    if not args.no_m4l and (not args.prefix or args.user_library):
+        status = max(status, install_m4l(args, runner, os_name))
     if status == 0:
         runner.say(HOST_INSTRUCTIONS)
     return status

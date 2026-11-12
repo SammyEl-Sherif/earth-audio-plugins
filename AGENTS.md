@@ -66,6 +66,11 @@ shared/ui/            animalaudio::ui   INTERFACE lib whose .cpp files compile i
   Theme.h             Theme { Palette, name, tagline, Motif }; Motif = the animal (mascot, knob cap, ambient, decoration)
   ShaperEditor        optional shared curve-shaper editor (Duck uses it at 820x470); not required for every plugin
   BrandBadge, PillButton, ChoicePillRow, RotaryKnob/ThemedKnob, CurveEditor, CurvePresetPanel, Drawing.h
+shared/m4l/           Max for Live devices for Push 3 standalone (one per plugin, all one design): aamax/ (Python
+                      builder: params, ui layout helpers, device spec -> patcher, frozen .amxd), ui/aa_ui.js (the shared
+                      jsui kit: theme + widgets, ES5), tests/. Each plugin's port is plugins/<slug>/m4l/ (device.py spec,
+                      <slug>.genexpr gen~ DSP, optional ui.js widgets, built <Name>.amxd checked in, README.md).
+                      Build: scripts/build_m4l.py [--check] [--preview]. Rules and API: shared/m4l/README.md
 shared/testing/       animalaudio::testing header-only Catch2 suites: AA_SHAPER_PLUGIN_TESTS, AA_GAIN_SHAPER_PLUGIN_TESTS
   SignalProbe.h       JUCE-free signal helpers for DSP tests (sine, noise, rms, tone amplitude, peak frequency, cents)
 plugins/duck/         only what is Duck-specific:
@@ -94,9 +99,7 @@ plugins/cosmos/       granular looper (own processor and editor; the series' one
                       cap, starfield + synthwave grid, sunset lettering), CosmosWidgets (CosmosKnob, ModeButton,
                       HoldButton)
   tests/              CosmosTests.cpp
-  m4l/                Max for Live port for Push 3 standalone: cosmos.genexpr (gen~ port of Source/dsp + Svf +
-                      FdnReverb), build_amxd.py (patcher, Live params, Push banks -> Cosmos.amxd, `--check`),
-                      Cosmos.amxd (built, checked in). Keep in step with Source/dsp; see m4l/README.md
+  m4l/                Max for Live port (see shared/m4l below); out5 = loop length for the UI
 plugins/dolphinflow/  keyboard chord instrument (own processor and editor; the series' first instrument):
   Source/             DolphinFlowProcessor (params, held-root stack, MIDI + editor-key events via a lock-free FIFO,
                       MIDI out of the played notes), NoteOut (MIDI out: MPE channel per note, glides as pitch
@@ -151,6 +154,11 @@ scripts/verify_plugin.sh Duck                               # build + ctest + sc
   (`templates/`, `shared/`, `cmake/`, root `CMakeLists.txt`, `scripts/new_plugin.py`, `scripts/lib/`, `build.yml`,
   `.github/actions/`), and skips the real-mouse suite and pluginval, which Duck's job runs on the same shared code.
   Changing the template? Run the same locally in a git worktree.
+- Max for Live devices: `python3 scripts/build_m4l.py` (rebuild every `plugins/*/m4l/*.amxd`; `--check` in CI via
+  `check_repo.sh`; `--preview` writes `build/m4l-preview/index.html`), tests `python3 -m unittest discover -s
+  shared/m4l/tests`, and on macOS with Live installed `python3 scripts/check_m4l_gen.py` (compiles every gen~ with
+  Max's real compiler; run it before shipping GenExpr changes). When a plugin's DSP or parameters change, update its
+  `m4l/` port too (shared/m4l/README.md).
 - Format: `scripts/format.sh` (CI checks `clang-format --dry-run --Werror` on all `*.h`/`*.cpp`).
 - Script checks: `scripts/check_repo.sh` runs `bash -n` on `scripts/*.sh`, `py_compile` on the Python scripts, the
   install-script unit tests and, when `pwsh` exists (CI), the PowerShell parser on `scripts/*.ps1`.
@@ -165,7 +173,11 @@ Run the **`/setup`** skill (`.cursor/skills/setup/SKILL.md`, mirrored for Claude
 install into the OS VST3 folder (macOS `~/Library/Audio/Plug-Ins/VST3`, Windows `%COMMONPROGRAMFILES%\VST3` if admin else
 `%LOCALAPPDATA%\Programs\Common\VST3`, Linux `~/.vst3`; `--user` / `--system` / `--prefix`), removing stale copies from the
 other folders, clearing macOS quarantine + ad-hoc codesign, then printing each installed path with its build stamp.
-`--list`, `--uninstall` and `--dry-run` also exist. Plugins are auto-discovered (no list to maintain). Behaviour changes go
+`--list`, `--uninstall` and `--dry-run` also exist. It also copies the Max for Live devices (`plugins/*/m4l/*.amxd`)
+into Live's User Library (`Presets/<type>/Max .../Animal Audio`, path from Live's `Library.cfg`; `--user-library`,
+`--no-m4l`, `--m4l-only`) and writes each folder's Live 12 tag sidecar (`Ableton Folder Info/dc66a3fa-...xmp`,
+merged, never clobbering user tags) so they sit under the browser tag **Creator > Animal Audio**. Live gives the VST3s
+that tag itself from the vendor name (`COMPANY_NAME "Animal Audio"` in cmake/AnimalAudioPlugin.cmake): keep it. Plugins are auto-discovered (no list to maintain). Behaviour changes go
 in the script and `scripts/tests/test_install_plugins.py` (run by `scripts/check_repo.sh` and CI, which also smoke-tests
 the script against a temp prefix on macOS after each plugin build). The skill's last step tells the user to enable
 *Use VST3 Plug-In System Folders*, Rescan (Alt/Option for a full rescan) and test in Live.

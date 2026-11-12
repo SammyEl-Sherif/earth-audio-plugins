@@ -4,6 +4,7 @@
 #   - plugins don't include files from other plugins or from outside their own folder tree
 #   - shared code doesn't depend on a plugin
 #   - scripts parse (bash -n, py_compile, PowerShell parser when pwsh exists) and the install-script tests pass
+#   - the Max for Live devices are built from their sources and pass shared/m4l/tests
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -31,6 +32,8 @@ if [ -n "$python_bin" ]; then
         "$python_bin" -m py_compile "$script" || { echo "error: syntax error in $script" >&2; status=1; }
     done
     "$python_bin" -m unittest discover -s scripts/tests || status=1
+    "$python_bin" scripts/build_m4l.py --check || status=1
+    "$python_bin" -m unittest discover -s shared/m4l/tests || status=1
 else
     echo "error: python is required for the script checks" >&2
     status=1
@@ -45,6 +48,6 @@ else
     echo "note: pwsh not found, skipping PowerShell syntax checks (CI has it)"
 fi
 
-find scripts -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
+find scripts shared/m4l plugins -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
 
 exit $status
