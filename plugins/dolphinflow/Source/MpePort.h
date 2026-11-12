@@ -30,6 +30,12 @@ public:
     bool isOpen() const noexcept { return output != nullptr; }
     juce::String getPortName() const;
 
+    /** The port's note-on velocity: one step from the played one (inaudible), so EchoGuard knows our notes. */
+    static int portVelocity(int velocity) noexcept
+    {
+        return (velocity & 1) != 0 ? (velocity == 127 ? 126 : velocity + 1) : velocity - 1;
+    }
+
     /** Audio thread: queues a block's MIDI out, each event at blockStartMs plus its sample offset. */
     void queue(const juce::MidiBuffer& buffer, double blockStartMs, double sampleRate) noexcept;
 

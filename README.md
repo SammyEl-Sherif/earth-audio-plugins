@@ -204,8 +204,8 @@ melodic house pads, tech house stabs, ambient swells, emotional keys.
   no glides. **For the glides as MPE** (macOS), record the **Animal Audio - Dolphin Flow** MIDI port the plugin creates instead:
   in Live's Settings > Link, Tempo & MIDI turn on *Track* and *MPE* for the *Animal Audio - Dolphin Flow* input; on a new MIDI
   track set *MIDI From* = *Animal Audio - Dolphin Flow*, arm it and record. Each note gets its own channel and every glide is that
-  note's pitch bend (48 semitone range), shown in the clip's MPE tab. Set the Dolphin Flow track's own input to your
-  keyboard, not *All Ins*, or it hears its own output. **MPE** off sends plain channel 1 notes. Notes already sounding are sent again when Live starts playing or recording, so a latched chord or
+  note's pitch bend (48 semitone range), shown in the clip's MPE tab. Dolphin Flow ignores its own port notes coming back in
+  (a track on *All Ins* hears them), but setting its track's input to your keyboard is cleaner. **MPE** off sends plain channel 1 notes. Notes already sounding are sent again when Live starts playing or recording, so a latched chord or
   the loop is in the clip from its first beat (in Session view, latch after the clip starts recording). Drop that clip back on
   the Dolphin Flow track and it plays the same voicings and glides (three or more notes held at once are played exactly
   as written; one or two are roots). To record the sound, make an audio track with *Audio From* = the Dolphin Flow
