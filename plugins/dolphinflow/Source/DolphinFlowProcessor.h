@@ -1,5 +1,6 @@
 #pragma once
 
+#include "EchoGuard.h"
 #include "MpePort.h"
 #include "NoteOut.h"
 #include "dsp/DolphinFlowEngine.h"
@@ -141,16 +142,7 @@ private:
         }
     };
 
-    /** A note-on we sent to the MPE port, so the same note coming back in (an armed track on All Ins) is ignored. */
-    struct Sent
-    {
-        int channel = 0;
-        int note = -1;
-        juce::int64 at = 0; // sample clock
-    };
-
     static constexpr int kMaxHeld = 32;
-    static constexpr int kMaxSent = 64;
     static constexpr int kMinVoicedNotes = 3;
     static constexpr int kKeyVelocity = 100;
     static constexpr int kReferenceOctave = 5; // MIDI 60-71 (Live's C3, its computer keyboard's home) plays at OCTAVE
@@ -165,7 +157,7 @@ private:
     void resolve() noexcept;
     void syncMidiOut(int samplePosition) noexcept;
     void handleMidiMessage(const juce::MidiMessage& message) noexcept;
-    bool isOwnEcho(const juce::MidiMessage& message) noexcept;
+    bool isOwnEcho(const juce::MidiMessage& message) const noexcept;
     void rememberSent(const juce::MidiBuffer& buffer) noexcept;
     void drainUiEvents() noexcept;
     void postUiEvent(const UiEvent& event);
@@ -182,9 +174,7 @@ private:
     juce::MidiBuffer midiOut;
     NoteOut noteOut;
     MpePort mpePort;
-    std::array<Sent, kMaxSent> sent{};
-    int sentHead = 0;
-    juce::int64 sampleClock = 0;
+    std::uint32_t blockMs = 0; // wall clock at this block's start, for EchoGuard
     bool lastPlaying = false;
     bool lastRecording = false;
     int lastShape = 0;

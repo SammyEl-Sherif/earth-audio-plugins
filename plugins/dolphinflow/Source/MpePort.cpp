@@ -57,6 +57,8 @@ void MpePort::queue(const juce::MidiBuffer& buffer, double blockStartMs, double 
         slot->timeMs = blockStartMs + metadata.samplePosition * msPerSample;
         slot->size = metadata.numBytes;
         std::copy(metadata.data, metadata.data + metadata.numBytes, slot->bytes);
+        if (slot->size == 3 && (slot->bytes[0] & 0xf0) == 0x90 && slot->bytes[2] > 0)
+            slot->bytes[2] = static_cast<juce::uint8>(portVelocity(slot->bytes[2]));
     }
 }
 

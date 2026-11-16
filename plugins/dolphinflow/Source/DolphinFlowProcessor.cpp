@@ -125,7 +125,6 @@ void DolphinFlowProcessor::prepareToPlay(double sampleRate, int)
     intent = {};
     playedOctave = 0;
     noteOut.reset();
-    sent.fill({});
     lastPlaying = false;
     lastRecording = false;
     sequencing = false;
@@ -234,32 +233,22 @@ void DolphinFlowProcessor::syncMidiOut(int samplePosition) noexcept
     noteOut.sync(engine, lastVelocity, midiOut, samplePosition);
 }
 
-bool DolphinFlowProcessor::isOwnEcho(const juce::MidiMessage& message) noexcept
+bool DolphinFlowProcessor::isOwnEcho(const juce::MidiMessage& message) const noexcept
 {
-    // Our MPE port feeds every armed track listening to All Ins, this one included. A note-on matching one we sent
-    // in the last second is that echo: it would turn the next root into an added note instead of a glide.
-    if (message.getChannel() < NoteOut::kFirstMemberChannel)
-        return false; // plain notes and keyboards on channel 1 are always played
-    const auto window = static_cast<juce::int64>(getSampleRate());
-    for (auto& s : sent)
-        if (s.note == message.getNoteNumber() && s.channel == message.getChannel() && sampleClock - s.at <= window)
-        {
-            s.note = -1; // each sent note echoes once
-            return true;
-        }
-    return false;
+    // Our MPE port feeds every armed track listening to All Ins, this one included (on channel 1, as Live gives it to
+    // us). Played again, each echo would add notes that echo again, until the notes pile up and never stop.
+    return EchoGuard::isEcho(message.getNoteNumber(), message.getVelocity(), blockMs);
 }
 
 void DolphinFlowProcessor::rememberSent(const juce::MidiBuffer& buffer) noexcept
 {
+    const double msPerSample = 1000.0 / std::max(1.0, getSampleRate());
     for (const auto metadata : buffer)
     {
         const auto message = metadata.getMessage();
-        if (!message.isNoteOn() || message.getChannel() < NoteOut::kFirstMemberChannel)
-            continue;
-        sent[static_cast<std::size_t>(sentHead)] = {message.getChannel(), message.getNoteNumber(),
-                                                    sampleClock + metadata.samplePosition};
-        sentHead = (sentHead + 1) % kMaxSent;
+        if (message.isNoteOn())
+            EchoGuard::remember(message.getNoteNumber(), MpePort::portVelocity(message.getVelocity()),
+                                blockMs + static_cast<std::uint32_t>(metadata.samplePosition * msPerSample));
     }
 }
 
@@ -343,6 +332,7 @@ void DolphinFlowProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::
 {
     juce::ScopedNoDenormals noDenormals;
     const double blockStartMs = juce::Time::getMillisecondCounterHiRes();
+    blockMs = static_cast<std::uint32_t>(static_cast<juce::int64>(blockStartMs));
     midiOut.clear();
     const int numSamples = buffer.getNumSamples();
     const int channels = std::min(buffer.getNumChannels(), dsp::DolphinFlowEngine::kMaxChannels);
@@ -460,7 +450,6 @@ void DolphinFlowProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::
         mpePort.queue(midiOut, blockStartMs, getSampleRate()); // MPE only: plain channel 1 notes have no glides
         rememberSent(midiOut);
     }
-    sampleClock += numSamples;
     midi.swapWith(midiOut);
 }
 
