@@ -2,6 +2,7 @@
 
 #include "dsp/DolphinFlowEngine.h"
 #include "dsp/Progression.h"
+#include "dsp/Theory.h"
 
 #include <juce_audio_processors/juce_audio_processors.h>
 
@@ -24,6 +25,8 @@ inline const juce::ParameterID space{"space", 1};
 inline const juce::ParameterID level{"level", 1};
 inline const juce::ParameterID latch{"latch", 1};
 inline const juce::ParameterID loop{"loop", 1};
+inline const juce::ParameterID key{"key", 1};
+inline const juce::ParameterID scale{"scale", 1};
 } // namespace ids
 
 /**
@@ -84,6 +87,12 @@ public:
     juce::File defaultClipFile() const;
 
     const dsp::DolphinFlowEngine& getEngine() const noexcept { return engine; }
+
+    // Key: the KEY / SCALE parameters are home; the palette can borrow from neighbouring keys and parallel modes.
+    // Message thread. The borrowed position is saved with the plugin state, not automated.
+    dsp::PaletteKey getPaletteKey() const;
+    void setPaletteBorrow(int shift, int scale);
+    unsigned getHomeKeyMask() const;
 
     juce::AudioProcessorValueTreeState apvts;
 

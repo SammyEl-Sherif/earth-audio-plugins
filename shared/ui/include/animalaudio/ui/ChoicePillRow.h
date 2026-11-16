@@ -23,6 +23,15 @@ public:
 
     /** Width needed for `numChoices` pills. */
     static int widthFor(int numChoices) noexcept { return numChoices * (kPillWidth + kGap) - kGap; }
+    /** Height needed for `numChoices` pills of `pillHeight` wrapped into rows of `columns`. */
+    static int heightFor(int numChoices, int columns, int pillHeight) noexcept
+    {
+        const int rows = (numChoices + columns - 1) / columns;
+        return rows * (pillHeight + kGap) - kGap;
+    }
+
+    /** Wrap onto further rows after `columns` pills (0 = one row). Each row is as tall as the bounds allow. */
+    void setColumns(int columns);
 
     int getNumPills() const noexcept { return static_cast<int>(pills.size()); }
     juce::Button& getPill(int index) { return *pills[static_cast<std::size_t>(index)]; }
@@ -35,5 +44,6 @@ private:
     juce::AudioParameterChoice& choice;
     std::vector<std::unique_ptr<PillButton>> pills;
     std::unique_ptr<juce::ParameterAttachment> attachment;
+    int columns = 0;
 };
 } // namespace animalaudio::ui

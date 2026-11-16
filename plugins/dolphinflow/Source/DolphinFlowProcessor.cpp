@@ -19,6 +19,8 @@ const juce::Identifier kSlot{"Slot"};
 const juce::Identifier kRoot{"root"};
 const juce::Identifier kShape{"shape"};
 const juce::Identifier kLength{"length"};
+const juce::Identifier kPaletteShift{"paletteShift"};
+const juce::Identifier kPaletteScale{"paletteScale"};
 
 /** First open: a deep house staple, Am7 - Fmaj7 - C - G, a bar each. */
 dsp::Slot defaultSlot(int index)
@@ -57,6 +59,14 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
     layout.add(percentParameter(ids::level, "Level", 0.7f));
     layout.add(std::make_unique<juce::AudioParameterBool>(ids::latch, "Latch", false));
     layout.add(std::make_unique<juce::AudioParameterBool>(ids::loop, "Loop", false));
+    juce::StringArray keys;
+    for (int pc = 0; pc < 12; ++pc)
+        keys.add(dsp::pitchClassName(pc));
+    juce::StringArray scales;
+    for (const auto& scale : dsp::kScales)
+        scales.add(scale.name);
+    layout.add(std::make_unique<juce::AudioParameterChoice>(ids::key, "Key", keys, 0));
+    layout.add(std::make_unique<juce::AudioParameterChoice>(ids::scale, "Scale", scales, 0));
     return layout;
 }
 } // namespace
@@ -536,12 +546,42 @@ bool DolphinFlowProcessor::writeMidiClip(const juce::File& file) const
     return out.openedOk() && midiFile.writeTo(out, 1);
 }
 
+dsp::PaletteKey DolphinFlowProcessor::getPaletteKey() const
+{
+    dsp::PaletteKey key;
+    key.homeTonic = std::clamp(juce::roundToInt(getParameterValue(ids::key)), 0, 11);
+    key.homeScale = std::clamp(juce::roundToInt(getParameterValue(ids::scale)), 0, dsp::kNumScales - 1);
+    key.shift = std::clamp(static_cast<int>(apvts.state.getProperty(kPaletteShift, 0)), -dsp::kMaxPaletteShift,
+                           dsp::kMaxPaletteShift);
+    // -1 (or nothing saved) follows the home scale, so changing SCALE moves the palette with it.
+    const int scale = static_cast<int>(apvts.state.getProperty(kPaletteScale, -1));
+    key.scale = scale < 0 ? key.homeScale : std::clamp(scale, 0, dsp::kNumScales - 1);
+    return key;
+}
+
+void DolphinFlowProcessor::setPaletteBorrow(int shift, int scale)
+{
+    const int homeScale = std::clamp(juce::roundToInt(getParameterValue(ids::scale)), 0, dsp::kNumScales - 1);
+    apvts.state.setProperty(kPaletteShift, std::clamp(shift, -dsp::kMaxPaletteShift, dsp::kMaxPaletteShift), nullptr);
+    apvts.state.setProperty(kPaletteScale, scale == homeScale ? -1 : std::clamp(scale, 0, dsp::kNumScales - 1),
+                            nullptr);
+}
+
+unsigned DolphinFlowProcessor::getHomeKeyMask() const
+{
+    const auto key = getPaletteKey();
+    return dsp::scaleMask(key.homeTonic, key.homeScale);
+}
+
 juce::File DolphinFlowProcessor::defaultClipFile() const
 {
     juce::StringArray names;
     for (int i = 0; i < dsp::kNumSlots; ++i)
         if (const auto slot = getSlot(i); !slot.isEmpty())
-            names.add(juce::String(dsp::pitchClassName(slot.root)) + dsp::chordShape(slot.shape).symbol);
+        {
+            const auto key = getPaletteKey();
+            names.add(dsp::chordNameInKey(slot.root, slot.shape, key.homeTonic, key.homeScale).text);
+        }
     const auto name = juce::File::createLegalFileName("Dolphin Flow - " + names.joinIntoString(" ") + ".mid");
     return juce::File::getSpecialLocation(juce::File::userMusicDirectory)
         .getChildFile("Animal Audio")
