@@ -29,13 +29,19 @@ void ChoicePillRow::show(int index)
         pills[static_cast<std::size_t>(i)]->setToggleState(i == index, juce::dontSendNotification);
 }
 
+void ChoicePillRow::setColumns(int newColumns)
+{
+    columns = juce::jmax(0, newColumns);
+    resized();
+}
+
 void ChoicePillRow::resized()
 {
-    auto row = getLocalBounds();
-    for (auto& pill : pills)
-    {
-        pill->setBounds(row.removeFromLeft(kPillWidth));
-        row.removeFromLeft(kGap);
-    }
+    const int perRow = columns > 0 ? columns : getNumPills();
+    const int rows = juce::jmax(1, (getNumPills() + perRow - 1) / juce::jmax(1, perRow));
+    const int pillH = (getHeight() - kGap * (rows - 1)) / rows;
+    for (int i = 0; i < getNumPills(); ++i)
+        pills[static_cast<std::size_t>(i)]->setBounds((i % perRow) * (kPillWidth + kGap), (i / perRow) * (pillH + kGap),
+                                                      kPillWidth, pillH);
 }
 } // namespace animalaudio::ui

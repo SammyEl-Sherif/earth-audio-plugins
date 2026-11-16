@@ -12,11 +12,13 @@ namespace
 using animalaudio::ui::makeFont;
 
 constexpr float kHeaderH = 72.0f;
-const juce::Rectangle<float> kDisplay{20.0f, 88.0f, 600.0f, 248.0f};
-const juce::Rectangle<float> kKnobPanel{636.0f, 88.0f, 304.0f, 248.0f};
-const juce::Rectangle<float> kKeysPanel{20.0f, 352.0f, 600.0f, 124.0f};
-const juce::Rectangle<float> kSoundPanel{636.0f, 352.0f, 304.0f, 124.0f};
-const juce::Rectangle<float> kChordPanel{20.0f, 492.0f, 920.0f, 92.0f};
+const juce::Rectangle<float> kDisplay{20.0f, 88.0f, 720.0f, 340.0f};
+const juce::Rectangle<float> kKnobPanel{756.0f, 88.0f, 324.0f, 340.0f};
+const juce::Rectangle<float> kKeysPanel{20.0f, 444.0f, 720.0f, 120.0f};
+const juce::Rectangle<float> kSoundPanel{756.0f, 444.0f, 324.0f, 120.0f};
+const juce::Rectangle<float> kChordPanel{20.0f, 580.0f, 1060.0f, 120.0f};
+constexpr int kChordPillH = 28;
+constexpr int kPaletteSourceBase = DolphinFlowProcessor::kKeySourceBase + 300;
 constexpr float kViewSpan = 18.0f; // semitones above and below the ribbon view's centre
 constexpr int kKnobColumns = 3;
 
@@ -70,6 +72,16 @@ void RootKey::setLit(bool shouldBeLit)
     }
 }
 
+void RootKey::setKeyInfo(bool shouldBeInKey, bool shouldBeTonic)
+{
+    if (inKey != shouldBeInKey || isTonic != shouldBeTonic)
+    {
+        inKey = shouldBeInKey;
+        isTonic = shouldBeTonic;
+        repaint();
+    }
+}
+
 void RootKey::paint(juce::Graphics& g)
 {
     const auto area = getLocalBounds().toFloat().reduced(1.5f);
@@ -83,7 +95,7 @@ void RootKey::paint(juce::Graphics& g)
     g.setColour(on ? colours.accent.brighter(0.3f) : colours.outline);
     g.drawRoundedRectangle(area, 6.0f, 1.0f);
 
-    const auto ink = on ? colours.onAccent : colours.text;
+    const auto ink = on ? colours.onAccent : inKey ? colours.text : colours.textDim.withAlpha(0.7f);
     g.setColour(ink);
     g.setFont(makeFont(isBlack() ? 11.5f : 14.0f, true, 0.04f));
     g.drawText(dsp::pitchClassName(pitchClass), area.withTrimmedBottom(area.getHeight() * 0.45f),
@@ -93,6 +105,15 @@ void RootKey::paint(juce::Graphics& g)
     g.drawText(juce::String::charToString(static_cast<juce::juce_wchar>(kRootKeys[pitchClass])).toUpperCase(),
                area.withTrimmedTop(area.getHeight() * 0.6f).withTrimmedBottom(4.0f), juce::Justification::centred,
                false);
+
+    // In the home key: a dot along the bottom edge (the one part of a white key no black key covers), bigger on
+    // the tonic.
+    if (inKey)
+    {
+        const float size = isTonic ? 7.0f : 4.5f;
+        g.setColour(on ? colours.onAccent : colours.accent.withAlpha(isTonic ? 1.0f : 0.75f));
+        g.fillEllipse(area.getCentreX() - size * 0.5f, area.getBottom() - 6.0f - size * 0.5f, size, size);
+    }
 }
 
 void RootKey::mouseDown(const juce::MouseEvent&)
@@ -124,7 +145,9 @@ DolphinFlowEditor::DolphinFlowEditor(DolphinFlowProcessor& plugin)
     , octaveUp({}, theme.palette)
     , keysTab("KEYS", theme.palette)
     , arrangeTab("ARRANGE", theme.palette)
+    , paletteTab("PALETTE", theme.palette)
     , arrange(plugin, theme)
+    , paletteView(plugin, theme, arrange)
 {
     setOpaque(true);
     brand.setTooltip(animalaudio::core::buildStampLong(theme.name));
@@ -152,8 +175,11 @@ DolphinFlowEditor::DolphinFlowEditor(DolphinFlowProcessor& plugin)
         knobs.push_back(std::move(slot));
     }
 
-    chordPills =
-        makePills(ids::chord, "Chord quality (number keys 1-0). Changing it while a chord plays glides to it.", false);
+    chordPills = makePills(ids::chord,
+                           "Chord quality (number keys 1-0 for the top row). Changing it while a chord plays glides to "
+                           "it.",
+                           false);
+    chordPills->setColumns(dsp::kNumKeyedShapes);
     modePills = makePills(
         ids::mode, "PAD swells and glides legato. STAB and KEYS strike again on every chord, and still glide.", true);
     voicePills = makePills(ids::voices, "How many voices the chord is spread across.", false);
@@ -195,14 +221,18 @@ DolphinFlowEditor::DolphinFlowEditor(DolphinFlowProcessor& plugin)
     addAndMakeVisible(brand);
 
     keysTab.setTooltip("Play chords live, with the glide display.");
+    paletteTab.setTooltip("The chords of your key, with their numerals. Borrow from nearby keys, build a progression.");
     arrangeTab.setTooltip("Build an 8-chord progression that loops, and copy it as a MIDI clip.");
-    keysTab.setClickingTogglesState(false);
-    arrangeTab.setClickingTogglesState(false);
+    for (auto* tab : {&keysTab, &paletteTab, &arrangeTab})
+    {
+        tab->setClickingTogglesState(false);
+        addAndMakeVisible(*tab);
+    }
     keysTab.onClick = [this] { setView(View::Keys); };
+    paletteTab.onClick = [this] { setView(View::Palette); };
     arrangeTab.onClick = [this] { setView(View::Arrange); };
-    addAndMakeVisible(keysTab);
-    addAndMakeVisible(arrangeTab);
     addChildComponent(arrange);
+    addChildComponent(paletteView);
 
     // Keys must reach the editor, so clicking a control never takes keyboard focus away from it.
     for (auto* child : getChildren())
@@ -216,7 +246,8 @@ DolphinFlowEditor::DolphinFlowEditor(DolphinFlowProcessor& plugin)
         column.fill(-1.0f);
 
     setSize(kWidth, kHeight);
-    setView(static_cast<int>(owner.apvts.state.getProperty("view", 0)) == 1 ? View::Arrange : View::Keys);
+    const int savedView = static_cast<int>(owner.apvts.state.getProperty("view", 0));
+    setView(savedView == 1 ? View::Arrange : savedView == 2 ? View::Palette : View::Keys);
     refresh();
     startTimerHz(30);
 }
@@ -257,11 +288,22 @@ void DolphinFlowEditor::stepOctave(int delta)
 
 void DolphinFlowEditor::setView(View newView)
 {
+    if (view == View::Palette && newView != View::Palette)
+        for (int degree = 0; degree < dsp::kDegrees; ++degree)
+            if (auto& code = heldDegreeCodes[static_cast<std::size_t>(degree)]; code != 0)
+            {
+                code = 0;
+                owner.releaseRoot(kPaletteSourceBase + degree);
+            }
     view = newView;
-    owner.apvts.state.setProperty("view", view == View::Arrange ? 1 : 0, nullptr);
+    owner.apvts.state.setProperty("view", static_cast<int>(view), nullptr);
     keysTab.setToggleState(view == View::Keys, juce::dontSendNotification);
+    paletteTab.setToggleState(view == View::Palette, juce::dontSendNotification);
     arrangeTab.setToggleState(view == View::Arrange, juce::dontSendNotification);
     arrange.setVisible(view == View::Arrange);
+    paletteView.setVisible(view == View::Palette);
+    if (view == View::Palette)
+        paletteView.refresh();
     repaint();
 }
 
@@ -271,9 +313,21 @@ void DolphinFlowEditor::rootPlayed(int pitchClass)
         arrange.writeSelected(pitchClass, juce::roundToInt(owner.getParameterValue(ids::chord)));
 }
 
+void DolphinFlowEditor::playDegree(int degree, int keyCode)
+{
+    auto& code = heldDegreeCodes[static_cast<std::size_t>(degree)];
+    if (code != 0)
+        return; // auto-repeat
+    code = keyCode;
+    const auto chord = dsp::paletteChord(owner.getPaletteKey(), static_cast<int>(dsp::PaletteRow::Triad), degree);
+    owner.setParameterFromUi(ids::chord, static_cast<float>(chord.shape));
+    owner.pressRoot(kPaletteSourceBase + degree, chord.root);
+}
+
 void DolphinFlowEditor::releaseHeldKeys()
 {
     heldKeyCodes.fill(0);
+    heldDegreeCodes.fill(0);
     owner.releaseAllKeys();
 }
 
@@ -296,7 +350,21 @@ bool DolphinFlowEditor::keyPressed(const juce::KeyPress& key)
             }
             return true;
         }
-    for (int i = 0; i < dsp::kNumChordShapes; ++i)
+    if (view == View::Palette)
+    {
+        // Number keys play the scale's own chords; left / right borrow round the circle of fifths.
+        if (c >= '1' && c < '1' + dsp::kDegrees)
+        {
+            playDegree(static_cast<int>(c - '1'), key.getKeyCode());
+            return true;
+        }
+        if (key == juce::KeyPress::leftKey || key == juce::KeyPress::rightKey)
+        {
+            paletteView.borrow(key == juce::KeyPress::leftKey ? -1 : 1);
+            return true;
+        }
+    }
+    for (int i = 0; i < dsp::kNumKeyedShapes; ++i)
         if (c == static_cast<juce::juce_wchar>(kChordKeys[i]))
         {
             owner.setParameterFromUi(ids::chord, static_cast<float>(i));
@@ -342,13 +410,25 @@ bool DolphinFlowEditor::keyStateChanged(bool)
             handled = true;
         }
     }
+    for (int degree = 0; degree < dsp::kDegrees; ++degree)
+    {
+        auto& code = heldDegreeCodes[static_cast<std::size_t>(degree)];
+        if (code != 0 && !keyIsDown(code))
+        {
+            code = 0;
+            owner.releaseRoot(kPaletteSourceBase + degree);
+            handled = true;
+        }
+    }
     return handled;
 }
 
 void DolphinFlowEditor::focusLost(FocusChangeType)
 {
     // A key let go while another window has focus never reaches us; release rather than leave a chord stuck.
-    if (std::any_of(heldKeyCodes.begin(), heldKeyCodes.end(), [](int code) { return code != 0; }))
+    const auto down = [](int code) { return code != 0; };
+    if (std::any_of(heldKeyCodes.begin(), heldKeyCodes.end(), down) ||
+        std::any_of(heldDegreeCodes.begin(), heldDegreeCodes.end(), down))
         releaseHeldKeys();
 }
 
@@ -386,10 +466,17 @@ void DolphinFlowEditor::refresh()
 
     const int root = engine.getRoot();
     const bool audible = engine.getEnvelopeLevel() > 0.002f || engine.isGateOn();
+    const auto key = owner.getPaletteKey();
+    const unsigned home = dsp::scaleMask(key.homeTonic, key.homeScale);
     for (int pc = 0; pc < 12; ++pc)
+    {
         rootKeys[static_cast<std::size_t>(pc)]->setLit(audible && pc == root);
+        rootKeys[static_cast<std::size_t>(pc)]->setKeyInfo((home >> pc) & 1u, pc == key.homeTonic);
+    }
     if (view == View::Arrange)
         arrange.refresh();
+    else if (view == View::Palette)
+        paletteView.refresh();
     repaint();
 }
 
@@ -426,7 +513,8 @@ void DolphinFlowEditor::paintHeader(juce::Graphics& g) const
     if (audible)
     {
         // A played voicing that matches no chord shape is shown by its pitch classes.
-        juce::String symbol = juce::String(dsp::pitchClassName(root)) + dsp::chordShape(engine.getShape()).symbol;
+        const auto key = owner.getPaletteKey();
+        juce::String symbol = dsp::chordNameInKey(root, engine.getShape(), key.homeTonic, key.homeScale).text;
         if (engine.getShape() < 0)
         {
             juce::StringArray classes;
@@ -447,6 +535,13 @@ void DolphinFlowEditor::paintHeader(juce::Graphics& g) const
         juce::StringArray notes;
         for (int i = 0; i < heard; ++i)
             notes.add(noteName(pitches[static_cast<std::size_t>(i)]));
+        // Its numeral in the home key leads the note list.
+        if (engine.getShape() >= 0)
+        {
+            notes.insert(0, juce::String::fromUTF8(
+                                dsp::romanNumeral(root, engine.getShape(), key.homeTonic, key.homeScale).text) +
+                                "  /");
+        }
         g.setColour(palette.textDim);
         g.setFont(makeFont(11.0f, true, 0.12f));
         g.drawText(notes.joinIntoString("  "), readout.withTrimmedTop(38.0f), juce::Justification::centred, false);
@@ -590,7 +685,7 @@ void DolphinFlowEditor::paintChordKeys(juce::Graphics& g) const
     const auto row = chordPills->getBounds().toFloat();
     g.setColour(palette.textDim);
     g.setFont(makeFont(9.5f, true, 0.1f));
-    for (int i = 0; i < chordPills->getNumPills(); ++i)
+    for (int i = 0; i < dsp::kNumKeyedShapes; ++i)
     {
         const auto pill = chordPills->getPill(i).getBounds().toFloat().translated(row.getX(), row.getY());
         g.drawText(juce::String::charToString(static_cast<juce::juce_wchar>(kChordKeys[i])),
@@ -607,7 +702,7 @@ void DolphinFlowEditor::paintChordKeys(juce::Graphics& g) const
                juce::Justification::centred, false);
     g.setColour(palette.textDim);
     g.setFont(makeFont(9.5f, true, 0.18f));
-    g.drawText("OCTAVE  Z / X", juce::Rectangle<float>(down.getX() - 4.0f, row.getY() - 15.0f, 110.0f, 12.0f),
+    g.drawText("OCTAVE  Z / X", juce::Rectangle<float>(down.getX() - 4.0f, row.getY() - 15.0f, 100.0f, 12.0f),
                juce::Justification::centredLeft, false);
     const auto latch = latchButton.getBounds().toFloat();
     g.drawText("KEY L", latch.withY(row.getY() - 15.0f).withHeight(12.0f), juce::Justification::centred, false);
@@ -619,7 +714,17 @@ void DolphinFlowEditor::paint(juce::Graphics& g)
     g.fillAll(palette.background);
     paintHeader(g);
 
-    if (view == View::Arrange)
+    if (view == View::Palette)
+    {
+        const auto key = owner.getPaletteKey();
+        paintPanel(g, kDisplay, "CHORD PALETTE",
+                   key.isHome() ? juce::String("HOLD TO PLAY  /  DRAG TO A SQUARE  /  KEYS 1-7")
+                                : "BORROWING  /  HOLLOW = OUTSIDE " +
+                                      juce::String(dsp::pitchClassName(
+                                          key.homeTonic, dsp::prefersFlats(key.homeTonic, key.homeScale))) +
+                                      " " + dsp::scaleAt(key.homeScale).label);
+    }
+    else if (view == View::Arrange)
     {
         double beats = 0.0;
         for (int i = 0; i < dsp::kNumSlots; ++i)
@@ -659,9 +764,12 @@ void DolphinFlowEditor::paint(juce::Graphics& g)
 void DolphinFlowEditor::resized()
 {
     brand.setBounds(getWidth() - 20 - 150, 27, 150, 18);
-    keysTab.setBounds(640, 22, 62, 28);
-    arrangeTab.setBounds(708, 22, 78, 28);
-    arrange.setBounds(kDisplay.toNearestInt().reduced(14, 0).withTrimmedTop(32).withTrimmedBottom(12));
+    keysTab.setBounds(672, 22, 62, 28);
+    paletteTab.setBounds(740, 22, 86, 28);
+    arrangeTab.setBounds(832, 22, 78, 28);
+    const auto display = kDisplay.toNearestInt().reduced(14, 0).withTrimmedTop(32).withTrimmedBottom(12);
+    arrange.setBounds(display);
+    paletteView.setBounds(display);
 
     const auto knobArea = kKnobPanel.toNearestInt().withTrimmedTop(32).reduced(10, 4);
     const int cellW = knobArea.getWidth() / kKnobColumns;
@@ -672,7 +780,8 @@ void DolphinFlowEditor::resized()
         const int row = static_cast<int>(i) / kKnobColumns;
         const auto cell =
             juce::Rectangle<int>(knobArea.getX() + col * cellW, knobArea.getY() + row * cellH, cellW, cellH);
-        knobs[i].knob->setBounds(cell.withSizeKeepingCentre(66, 66).withY(cell.getY() + 2));
+        // Knob plus its two label lines is ~96 px tall: centre that block in the cell.
+        knobs[i].knob->setBounds(cell.withSizeKeepingCentre(66, 66).withY(cell.getY() + (cellH - 96) / 2));
     }
 
     // Piano layout: seven naturals across, sharps raised between them.
@@ -699,9 +808,11 @@ void DolphinFlowEditor::resized()
     mpeButton.setBounds(voicePills->getRight() - 62, sound.getY() + 30, 62, 26);
 
     const auto chord = kChordPanel.toNearestInt();
-    chordPills->setBounds(chord.getX() + 16, chord.getY() + 46, animalaudio::ui::ChoicePillRow::widthFor(10), 30);
-    octaveDown.setBounds(744, chord.getY() + 46, 28, 30);
-    octaveUp.setBounds(812, chord.getY() + 46, 28, 30);
-    latchButton.setBounds(852, chord.getY() + 46, 72, 30);
+    chordPills->setBounds(
+        chord.getX() + 16, chord.getY() + 44, animalaudio::ui::ChoicePillRow::widthFor(dsp::kNumKeyedShapes),
+        animalaudio::ui::ChoicePillRow::heightFor(dsp::kNumChordShapes, dsp::kNumKeyedShapes, kChordPillH));
+    octaveDown.setBounds(chord.getRight() - 196, chord.getY() + 44, 28, 30);
+    octaveUp.setBounds(chord.getRight() - 128, chord.getY() + 44, 28, 30);
+    latchButton.setBounds(chord.getRight() - 88, chord.getY() + 44, 72, 30);
 }
 } // namespace dolphinflow

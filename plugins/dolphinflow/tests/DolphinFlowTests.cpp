@@ -16,6 +16,7 @@
 #include <map>
 #include <cmath>
 #include <cstdlib>
+#include <string>
 #include <vector>
 
 using animalaudio::testing::largestStep;
@@ -1209,6 +1210,188 @@ TEST_CASE("dolphinflow: arrange view renders headlessly")
             bright += image.getPixelAt(x, y).getBrightness() > 0.55f ? 1 : 0;
     REQUIRE(bright > 400);
     writePngIfRequested(image, "dolphinflow-arrange.png");
+}
+
+// ---- keys, numerals and the chord palette -------------------------------------------------------------------
+
+namespace
+{
+std::string name(int root, int shape)
+{
+    return dolphinflow::dsp::chordName(root, shape).text;
+}
+
+std::string numeral(int root, int shape, int tonic, int scale)
+{
+    return dolphinflow::dsp::romanNumeral(root, shape, tonic, scale).text;
+}
+
+constexpr int kMajorScale = 0, kMinorScale = 1, kHarmonicMinor = 7;
+} // namespace
+
+TEST_CASE("dolphinflow: every chord shape has a distinct set of notes")
+{
+    using namespace dolphinflow::dsp;
+    for (int a = 0; a < kNumChordShapes; ++a)
+        for (int b = a + 1; b < kNumChordShapes; ++b)
+            REQUIRE(chordMask(0, a) != chordMask(0, b));
+    REQUIRE(name(C, 14) == "Cm7b5");
+    REQUIRE(name(G, 17) == "G7sus4");
+}
+
+TEST_CASE("dolphinflow: a key's own chords and their numerals")
+{
+    using namespace dolphinflow::dsp;
+    const char* triads[] = {"C", "Dm", "Em", "F", "G", "Am", "Bdim"};
+    const char* sevenths[] = {"Cmaj7", "Dm7", "Em7", "Fmaj7", "G7", "Am7", "Bm7b5"};
+    const char* numerals[] = {"I", "ii", "iii", "IV", "V", "vi", "vii\xc2\xb0"};
+    for (int d = 0; d < kDegrees; ++d)
+    {
+        const int root = degreeRoot(C, kMajorScale, d);
+        REQUIRE(name(root, stackedChord(C, kMajorScale, d, 3)) == triads[d]);
+        REQUIRE(name(root, stackedChord(C, kMajorScale, d, 4)) == sevenths[d]);
+        REQUIRE(numeral(root, stackedChord(C, kMajorScale, d, 3), C, kMajorScale) == numerals[d]);
+    }
+    // Harmonic minor raises the seventh: a dominant V7 and a diminished seventh on the leading tone.
+    REQUIRE(name(E, stackedChord(A, kHarmonicMinor, 4, 4)) == "E7");
+    REQUIRE(name(9 + 11 - 12, stackedChord(A, kHarmonicMinor, 6, 4)) == "G#dim7");
+    // Chords from outside the key are written against it.
+    REQUIRE(numeral(10, kMaj, C, kMajorScale) == "bVII");
+    REQUIRE(numeral(F, kMin, C, kMajorScale) == "iv");
+    REQUIRE(numeral(G, kDom7, C, kMinorScale) == "V7");
+    REQUIRE(numeral(D, 4, C, kMajorScale) == "ii7");
+}
+
+TEST_CASE("dolphinflow: the palette borrows round the circle of fifths and from parallel modes")
+{
+    using namespace dolphinflow::dsp;
+    PaletteKey home;
+    for (int d = 0; d < kDegrees; ++d)
+        for (int row = 0; row < kPaletteRows; ++row)
+            if (row != static_cast<int>(PaletteRow::LeadsTo))
+                REQUIRE(paletteChord(home, row, d).inKey);
+    REQUIRE(name(paletteChord(home, 2, 1).root, paletteChord(home, 2, 1).shape) == "Dm9");
+    REQUIRE(name(paletteChord(home, 2, 2).root, paletteChord(home, 2, 2).shape) == "Esus4");
+
+    const auto leadsToIi = paletteChord(home, static_cast<int>(PaletteRow::LeadsTo), 1);
+    REQUIRE(name(leadsToIi.root, leadsToIi.shape) == "A7");
+    REQUIRE(std::string(leadsToIi.numeral.text) == "V7/ii");
+    REQUIRE_FALSE(leadsToIi.inKey);
+
+    PaletteKey flatSide = home;
+    flatSide.shift = -1; // F major: its IV is Bb, borrowed into C as bVII
+    const auto bb = paletteChord(flatSide, 0, 3);
+    REQUIRE(name(bb.root, bb.shape) == "A#");
+    REQUIRE(std::string(chordNameInKey(bb.root, bb.shape, C, kMajorScale).text) == "Bb");
+    REQUIRE(std::string(chordNameInKey(3, 3, F, kMinorScale).text) == "Ebmaj7"); // F minor is a flat key
+    REQUIRE(std::string(chordNameInKey(6, 0, D, kMajorScale).text) == "F#");
+    REQUIRE_FALSE(bb.inKey);
+    REQUIRE(std::string(bb.numeral.text) == "bVII");
+    REQUIRE(paletteChord(flatSide, 0, 0).inKey); // F itself is still in C
+
+    PaletteKey parallel = home;
+    parallel.scale = kMinorScale; // C minor: the iv and bVI are classic borrowed chords
+    const auto fm = paletteChord(parallel, 0, 3);
+    REQUIRE(name(fm.root, fm.shape) == "Fm");
+    REQUIRE(std::string(fm.numeral.text) == "iv");
+    REQUIRE_FALSE(fm.inKey);
+    REQUIRE(std::string(paletteChord(parallel, 0, 5).numeral.text) == "bVI");
+}
+
+TEST_CASE("dolphinflow: key, scale and the borrowed palette are saved")
+{
+    dolphinflow::DolphinFlowProcessor a;
+    REQUIRE(paramValue(a, dolphinflow::ids::key) == 0.0f);
+    REQUIRE(paramValue(a, dolphinflow::ids::scale) == 0.0f);
+    REQUIRE(a.getPaletteKey().isHome());
+    a.setParameterFromUi(dolphinflow::ids::key, static_cast<float>(A));
+    a.setParameterFromUi(dolphinflow::ids::scale, static_cast<float>(kMinorScale));
+    a.setPaletteBorrow(2, 2); // two fifths up, dorian
+    a.setSlot(0, {C, 18, 2}); // a chord shape past the number keys
+    juce::MemoryBlock state;
+    a.getStateInformation(state);
+
+    dolphinflow::DolphinFlowProcessor b;
+    b.setStateInformation(state.getData(), static_cast<int>(state.getSize()));
+    const auto key = b.getPaletteKey();
+    REQUIRE(key.homeTonic == A);
+    REQUIRE(key.homeScale == kMinorScale);
+    REQUIRE(key.shift == 2);
+    REQUIRE(key.scale == 2);
+    REQUIRE(key.tonic() == 11);
+    REQUIRE(b.getSlot(0) == Slot{C, 18, 2});
+    REQUIRE(b.getHomeKeyMask() == dolphinflow::dsp::scaleMask(A, kMinorScale));
+}
+
+TEST_CASE("dolphinflow: the palette plays chords and writes them into squares")
+{
+    juce::ScopedJuceInitialiser_GUI gui;
+    Harness h(kRate, 512);
+    std::unique_ptr<dolphinflow::DolphinFlowEditor> editor(
+        static_cast<dolphinflow::DolphinFlowEditor*>(h.processor.createEditor()));
+    animalaudio::testing::click(editor->getPaletteTab());
+    REQUIRE(editor->getView() == dolphinflow::DolphinFlowEditor::View::Palette);
+    auto& palette = editor->getPaletteView();
+    REQUIRE(palette.isVisible());
+
+    // Holding a chord plays it with its own quality.
+    auto& g7 = palette.getCell(1, 4);
+    g7.mouseDown(animalaudio::testing::makeMouseEvent(g7, {5.0f, 5.0f}));
+    processBlock(h);
+    REQUIRE(h.processor.getEngine().getRoot() == G);
+    REQUIRE(h.processor.getEngine().getShape() == kDom7);
+    g7.mouseUp(animalaudio::testing::makeMouseEvent(g7, {5.0f, 5.0f}));
+    processBlock(h);
+    REQUIRE_FALSE(h.processor.getEngine().isGateOn());
+
+    // Double-click writes into the selected square and moves on.
+    editor->getArrangeView().select(5);
+    auto& dm7 = palette.getCell(1, 1);
+    dm7.mouseDoubleClick(animalaudio::testing::makeMouseEvent(dm7, {5.0f, 5.0f}));
+    REQUIRE(h.processor.getSlot(5).root == D);
+    REQUIRE(h.processor.getSlot(5).shape == 4);
+    REQUIRE(editor->getArrangeView().getSelected() == 6);
+
+    // Number keys play the scale's triads.
+    REQUIRE(editor->keyPressed(juce::KeyPress('6', {}, '6')));
+    processBlock(h);
+    REQUIRE(h.processor.getEngine().getRoot() == A);
+    REQUIRE(h.processor.getEngine().getShape() == kMin);
+    editor->keyStateChanged(false);
+    processBlock(h);
+    REQUIRE_FALSE(h.processor.getEngine().isGateOn());
+
+    // Arrows borrow; home comes back.
+    REQUIRE(editor->keyPressed(juce::KeyPress(juce::KeyPress::leftKey)));
+    REQUIRE(h.processor.getPaletteKey().shift == -1);
+    REQUIRE(palette.getCell(0, 3).getChord().root == 10);
+    animalaudio::testing::click(palette.getHomeButton());
+    REQUIRE(h.processor.getPaletteKey().isHome());
+    REQUIRE(palette.getCell(0, 3).getChord().root == F);
+}
+
+TEST_CASE("dolphinflow: palette view renders headlessly")
+{
+    juce::ScopedJuceInitialiser_GUI gui;
+    Harness h(kRate, 512);
+    h.processor.setPaletteBorrow(0, kMinorScale); // borrowing: some chords drawn hollow
+    std::unique_ptr<dolphinflow::DolphinFlowEditor> editor(
+        static_cast<dolphinflow::DolphinFlowEditor*>(h.processor.createEditor()));
+    editor->setView(dolphinflow::DolphinFlowEditor::View::Palette);
+    h.setParam(dolphinflow::ids::chord, 4.0f);
+    h.processor.pressRoot(dolphinflow::DolphinFlowProcessor::kKeySourceBase + A, A);
+    for (int frame = 0; frame < 20; ++frame)
+    {
+        processBlock(h, 1600);
+        editor->refresh();
+    }
+    const auto image = editor->createComponentSnapshot(editor->getLocalBounds(), true, 2.0f);
+    int bright = 0;
+    for (int y = 0; y < image.getHeight(); y += 2)
+        for (int x = 0; x < image.getWidth(); x += 2)
+            bright += image.getPixelAt(x, y).getBrightness() > 0.55f ? 1 : 0;
+    REQUIRE(bright > 400);
+    writePngIfRequested(image, "dolphinflow-palette.png");
 }
 
 TEST_CASE("dolphinflow: build stamp is baked in")

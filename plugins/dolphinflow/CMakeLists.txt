@@ -6,7 +6,8 @@ set(DOLPHINFLOW_SOURCES
     Source/dsp/DolphinFlowEngine.cpp
     Source/ui/ArrangeView.cpp
     Source/ui/DolphinFlowMotif.cpp
-    Source/ui/DolphinFlowTheme.cpp)
+    Source/ui/DolphinFlowTheme.cpp
+    Source/ui/PaletteView.cpp)
 
 aa_add_plugin(DolphinFlow
     PRODUCT_NAME "DolphinFlow"

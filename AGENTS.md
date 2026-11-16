@@ -65,7 +65,7 @@ shared/ui/            animalaudio::ui   INTERFACE lib whose .cpp files compile i
   Palette.h           colour roles every widget draws from; makePaletteFromHue(); makeFont(height, bold, kerning)
   Theme.h             Theme { Palette, name, tagline, Motif }; Motif = the animal (mascot, knob cap, ambient, decoration)
   ShaperEditor        optional shared curve-shaper editor (Duck uses it at 820x470); not required for every plugin
-  BrandBadge, PillButton, ChoicePillRow, RotaryKnob/ThemedKnob, CurveEditor, CurvePresetPanel, Drawing.h
+  BrandBadge, PillButton, ChoicePillRow (one row, or wrapped with setColumns), RotaryKnob/ThemedKnob, CurveEditor, CurvePresetPanel, Drawing.h
 shared/m4l/           Max for Live devices for Push 3 standalone (one per plugin, all one design): aamax/ (Python
                       builder: params, ui layout helpers, device spec -> patcher, frozen .amxd), ui/aa_ui.js (the shared
                       jsui kit: theme + widgets, ES5), tests/. Each plugin's port is plugins/<slug>/m4l/ (device.py spec,
@@ -105,9 +105,11 @@ plugins/dolphinflow/  keyboard chord instrument (own processor and editor; the s
                       MIDI out of the played notes), NoteOut (MIDI out: MPE channel per note, glides as pitch
                       bends, re-sent on host play/record start), MpePort (virtual "Animal Audio - Dolphin Flow" MIDI port mirroring MIDI out,
                       since Live drops VST3 pitch bend output; FIFO + sender thread; opened only when a host loads the plugin, tests call openMpePort), DolphinFlowEditor (computer keys, RootKey piano, glide ribbons)
-  Source/dsp/         Chords (10 qualities, identifyChord), VoiceLeader (least-movement voicing), DolphinFlowEngine
+  Source/dsp/         Chords (20 qualities, 10 on number keys, identifyChord), Theory (scales/modes, diatonic chords,
+                      roman numerals, key-aware spelling, the chord palette model), VoiceLeader (least-movement voicing), DolphinFlowEngine
                       (paraphonic glide synth), Progression (8 arrangement slots, loop maths, settled voicing, clip notes)
-  Source/ui/          ArrangeView (SlotCell squares, LOOP, ClipButton drag/save .mid),
+  Source/ui/          ArrangeView (SlotCell squares, LOOP, ClipButton drag/save .mid), PaletteView (PaletteCell chords,
+                      key / scale / borrow bar, StripCell drop targets for the 8 squares),
                       DolphinFlowTheme (kThemeHue 218, ocean blue + aqua + coral), DolphinFlowMotif (leaping dolphin,
                       dorsal-fin knob pointer,
                       lake ripples)
@@ -402,12 +404,23 @@ out, no audio input). Roots come from computer keys (editor) or MIDI notes; the 
 - MIDI clip (`writeMidiClip`): `buildClip` voices one settled pass, ties common tones, 960 ticks per beat, tempo and
   4/4 meta, end-of-track at the loop length. `ClipButton`: drag = `performExternalDragDropOfFiles`, click = save to
   `~/Music/Animal Audio/Dolphin Flow/Dolphin Flow - <chords>.mid` and copy the path.
-- Parameters (APVTS, version 1): `chord` (MAJ..MIN9), `mode` (Pad/Stab/Keys), `voices` (3-6, default 4), `octave`
+- Key and palette (`dsp/Theory.h`, JUCE-free): 9 scales (major, minor, the other 5 modes, harmonic and melodic minor).
+  `key` / `scale` are home. The palette is 4 rows x 7 degrees: triads, sevenths, colour (the stacked ninth if a shape
+  matches, else sus4 / sus2 / add9 in key, else the triad) and LEADS TO (the V7 of each degree). Borrowing moves the
+  palette `shift` fifths (+-6) round the circle and / or to a parallel mode; saved as `paletteShift` / `paletteScale`
+  (-1 = follow `scale`) on `apvts.state`, not parameters. A chord is "in key" (drawn filled) when every note is in
+  the home scale; numerals and spelling (flats in flat key signatures and for flattened degrees) are against home.
+  Colours: major family `accent`, minor `accentAlt`, other `textDim`. A palette chord held plays by setting `chord`
+  then pressing its root; in the PALETTE view keys `1`-`7` play the triads and the arrows borrow.
+- Chord shapes past the first ten are appended (saved indices keep meaning), so `Slot::pack` keeps the shape in five
+  bits; `identifyChord` tries the keyed ten first so a shared note set keeps its commoner name (Dm7 over F6).
+- Parameters (APVTS, version 1): `chord` (MAJ..MIN9, then AUG..MMAJ7), `key` (C..B), `scale` (Major..Melodic Minor), `mode` (Pad/Stab/Keys), `voices` (3-6, default 4), `octave`
   (-2..+2), `glide` (0-2000 ms, default 350), `curve`, `tone`, `width`, `space`, `level` (0-100%), `latch`, `loop` (bool).
-- UI (`DolphinFlowEditor`, 960x600): header (dolphin, DOLPHIN FLOW / CHORD GLIDER, chord symbol and voiced notes,
-  KEYS / ARRANGE view tabs (saved as `view` on the state tree), badge); ARRANGE swaps the GLIDE display for `ArrangeView`
+- UI (`DolphinFlowEditor`, 1100x720): header (dolphin, DOLPHIN FLOW / CHORD GLIDER, chord symbol, numeral and voiced
+  notes, KEYS / PALETTE / ARRANGE view tabs (saved as `view` 0 / 2 / 1 on the state tree), badge); PALETTE swaps the
+  GLIDE display for `PaletteView`, ARRANGE for `ArrangeView`
   (a played root writes into the selected square); GLIDE display (5 s of voice-pitch ribbons over C-lines, swell); SOUND knobs (`ThemedKnob`, dorsal-fin cap); ROOT piano with
-  computer-key letters; MODE and VOICES pills; CHORD pills with their number keys, OCTAVE stepper, LATCH. Children never
+  computer-key letters and in-key dots; MODE and VOICES pills; CHORD pills in two rows (`ChoicePillRow::setColumns`), the first with their number keys, OCTAVE stepper, LATCH. Children never
   take keyboard focus, so keys always reach the editor; losing focus releases held keys.
 - Limits: paraphonic (one envelope and filter for the chord). Live keeps some keys (space, its own computer MIDI
   keyboard when on); the editor needs focus to hear keys.

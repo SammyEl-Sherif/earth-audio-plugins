@@ -2,9 +2,10 @@
   "code": "AA-005",
   "name": "DOLPHIN FLOW",
   "category": "Chord instrument",
-  "blurb": "Play chord progressions from your computer keyboard, and hear every note glide into the next chord.",
-  "longDescription": "DOLPHIN FLOW turns letter keys into roots and number keys into chord types, then voices each change so the notes move as little as possible. Every voice glides into its new note, so progressions flow into each other, and the notes it plays come out as MIDI you can record and edit.",
+  "blurb": "Find the chords of your key, play them from your computer keyboard, and hear every note glide into the next.",
+  "longDescription": "DOLPHIN FLOW turns letter keys into roots and number keys into chord types, then voices each change so the notes move as little as possible. A chord palette lays out every chord in your key with its roman numeral, and borrows from neighbouring keys and parallel modes when you want something unexpected. Every voice glides into its new note, so progressions flow into each other, and the notes it plays come out as MIDI you can record and edit.",
   "highlights": [
+    "Chord palette for your key, with numerals",
     "Chords from your computer keyboard",
     "Every note glides",
     "Loop 8-chord progressions, drag out MIDI"

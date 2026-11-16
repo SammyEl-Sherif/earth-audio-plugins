@@ -11,9 +11,10 @@ using animalaudio::ui::makeFont;
 constexpr float kStepperW = 24.0f;
 constexpr float kLengthRowH = 22.0f;
 
-juce::String chordName(const dsp::Slot& slot)
+juce::String chordName(const DolphinFlowProcessor& processor, const dsp::Slot& slot)
 {
-    return juce::String(dsp::pitchClassName(slot.root)) + dsp::chordShape(slot.shape).symbol;
+    const auto key = processor.getPaletteKey();
+    return dsp::chordNameInKey(slot.root, slot.shape, key.homeTonic, key.homeScale).text;
 }
 
 void sign(juce::Graphics& g, juce::Rectangle<float> area, bool plus)
@@ -128,7 +129,13 @@ void SlotCell::paint(juce::Graphics& g)
     {
         g.setColour(playing ? colours.text : colours.accent);
         g.setFont(makeFont(22.0f, true, 0.02f));
-        g.drawFittedText(chordName(slot), body.toNearestInt(), juce::Justification::centred, 1, 0.7f);
+        g.drawFittedText(chordName(processor, slot), body.withTrimmedBottom(14.0f).toNearestInt(),
+                         juce::Justification::centred, 1, 0.7f);
+        const auto key = processor.getPaletteKey();
+        g.setColour(colours.textDim);
+        g.setFont(makeFont(10.5f, true, 0.06f));
+        g.drawText(juce::String::fromUTF8(dsp::romanNumeral(slot.root, slot.shape, key.homeTonic, key.homeScale).text),
+                   body.withTop(body.getBottom() - 20.0f), juce::Justification::centred, false);
     }
 
     const auto lengthRow = area.removeFromBottom(kLengthRowH);

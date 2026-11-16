@@ -182,7 +182,16 @@ melodic house pads, tech house stabs, ambient swells, emotional keys.
   `Z` / `X` shift it with the plugin window closed. Hold several: letting go of the newest falls back to the one
   still held.
 - **Chords** on the number row: `1` MAJ, `2` MIN, `3` 7, `4` MAJ7, `5` MIN7, `6` SUS2, `7` SUS4, `8` DIM, `9` ADD9,
-  `0` MIN9 (also the CHORD pills, automatable). Changing the chord while one sounds glides into it.
+  `0` MIN9, plus AUG, 6, MIN6, DIM7, M7B5, 9, MAJ9, 7SUS4, MIN11 and MMAJ7 on the second row of CHORD pills
+  (automatable). Changing the chord while one sounds glides into it.
+- **PALETTE view**: set the song's key and scale (major, minor, dorian, phrygian, lydian, mixolydian, locrian,
+  harmonic or melodic minor) and the palette lays out its chords by scale degree: triads, sevenths, colour chords
+  (ninths and suspensions) and the dominant that leads into each degree (V7/ii...), each with its roman numeral.
+  Major-family chords are aqua, minor violet, the rest grey; a hollow chord borrows a note from outside the key. The
+  arrows borrow from neighbouring keys round the circle of fifths, the key name switches to a parallel mode, the house
+  comes home. Hold a chord to hear it, drag it onto one of the eight squares underneath (or double-click it into the
+  selected one) to build the loop; keys `1`-`7` play the triads. Numerals also show on the squares and in the header,
+  and the ROOT keys mark the notes in the key.
 - **Voice leading**: 3 to 6 voices; each chord change tries every way of handing the chord tones to the voices and
   keeps the one that moves least (with small nudges toward the root in the bass, against unisons, and toward the
   register centre). Common tones hold, the rest step to the nearest note.
@@ -215,6 +224,10 @@ melodic house pads, tech house stabs, ambient swells, emotional keys.
 
 <p align="center">
   <img src="docs/images/dolphinflow-ui.png" alt="Dolphin Flow by Animal Audio" width="760">
+</p>
+
+<p align="center">
+  <img src="docs/images/dolphinflow-palette.png" alt="Dolphin Flow chord palette" width="760">
 </p>
 
 <p align="center">
