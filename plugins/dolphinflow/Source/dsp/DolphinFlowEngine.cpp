@@ -34,13 +34,6 @@ inline float saw(float& phase, float increment) noexcept
     return out;
 }
 
-/** Glide shape: 0 is an even slide, 1 a fast start that eases into the note. */
-inline float glideShape(float t, float curve) noexcept
-{
-    const float u = 1.0f - t;
-    return t + curve * ((1.0f - u * u * u) - t);
-}
-
 /** Per-sample coefficient that gets an exponential segment to ~1% in `seconds`. */
 inline float decayCoefficient(double seconds, double sampleRate) noexcept
 {

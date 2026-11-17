@@ -182,7 +182,32 @@ melodic house pads, tech house stabs, ambient swells, emotional keys.
   `Z` / `X` shift it with the plugin window closed. Hold several: letting go of the newest falls back to the one
   still held.
 - **Chords** on the number row: `1` MAJ, `2` MIN, `3` 7, `4` MAJ7, `5` MIN7, `6` SUS2, `7` SUS4, `8` DIM, `9` ADD9,
-  `0` MIN9 (also the CHORD pills, automatable). Changing the chord while one sounds glides into it.
+  `0` MIN9, plus AUG, 6, MIN6, DIM7, M7B5, 9, MAJ9, 7SUS4, MIN11 and MMAJ7 on the second row of CHORD pills
+  (automatable). Changing the chord while one sounds glides into it.
+- **COMPOSE page** (write a whole song, chords, lead and bass, the way chord-writing tools like Klimper work):
+  - **Song key** and scale (major, minor, dorian, phrygian, lydian, mixolydian, locrian, harmonic or melodic minor).
+  - **Chord palette**: circles by scale degree, with rows for triads, sus, 6, 7, add9, 9 and the dominant that leads
+    into each degree (V7/ii...). Aqua is major, violet minor, grey the rest; a hollow circle borrows a note from
+    outside the key. Arrows borrow from neighbouring keys round the circle of fifths, the key name picks a parallel
+    mode, the house comes home. **CHORD RELATIONS** rings what follows the chord you last clicked (solid: strong
+    pull, dashed: smooth). Hold a circle to hear it; keys `1`-`7` play the triads.
+  - **Timeline**: sections (Intro, Verse, Chorus... rename, recolour, duplicate, + adds one) and their chords. Drag a
+    circle in, drag a chord's right edge to change its length, drag it to move it (alt copies), Backspace deletes,
+    click the ruler to move the playhead. **Am | vi** shows chords by name or numeral.
+  - **Tracks**: Chords plus Lead and Bass (+ ADD NEW TRACK for up to four: lead, bass, pad, arp), each with solo,
+    mute and volume. The chord track's **VOICING** shows its notes as they are voiced.
+  - **Piano roll** for each melody track: rows shaded by how they sit against the chord above (root, chord tones,
+    extensions, in key, out of key), other tracks as ghost notes. Click to add a note, drag to move (alt copies),
+    drag its ends, double-click deletes, drag empty space to select, cmd-C / X / V / D / A, arrows move, VELOCITY
+    mode. Right-click selected notes to set the chord above from them, or **FIND CHORDS FOR NOTES** to light up the
+    palette chords that contain them.
+  - **Transport**: play / pause, back to start, LOOP, and LINK (the song plays whenever Live plays, at Live's
+    position). Grid 1 bar to 1/32. Undo / redo (cmd-Z / shift-cmd-Z).
+  - **MIDI out**: the chords on channel 1 (MPE: 2-12), each melody track on its own channel (Lead 13, Bass 14, ...),
+    so in Live a MIDI track with *MIDI From* = Dolphin Flow and that channel plays the part on any instrument.
+  - **Export**: drag the button bottom right onto a track to drop the selected part as a MIDI clip: the chords (or just
+    the selected ones), a melody track, or with alt the whole song (every track). With MPE on, the chord clip carries
+    each glide as its note's pitch bend, shaped by GLIDE and CURVE, so it shows in Live's MPE editor.
 - **Voice leading**: 3 to 6 voices; each chord change tries every way of handing the chord tones to the voices and
   keeps the one that moves least (with small nudges toward the root in the bass, against unisons, and toward the
   register centre). Common tones hold, the rest step to the nearest note.
@@ -193,11 +218,6 @@ melodic house pads, tech house stabs, ambient swells, emotional keys.
   `L` latch.
 - **Sound**: two detuned band-limited saws per voice into one shared envelope, filter (`dsp::Svf`) and reverb
   (`dsp::FdnReverb`).
-- **ARRANGE view**: eight chord squares that loop in order. Select a square, pick a chord (`1`-`0`) and play a root
-  to write it (the selection moves on); `-` / `+` on each square sets its length (1 beat to 4 bars), right-click or
-  Backspace empties it, arrows move the selection. **LOOP** plays it, locked to Live's beat while Live plays, else
-  free-running at the host tempo. **COPY MIDI CLIP**: drag it onto a MIDI track to drop one pass of the loop as a clip,
-  voiced exactly as it plays; a click saves the `.mid` to `~/Music/Animal Audio/Dolphin Flow` and copies its path.
 - **Recording**: the notes it plays come out as MIDI (the voiced chord, common tones held across changes), whether
   you play them, LATCH holds them or LOOP plays them. In Live, make a second MIDI track with *MIDI From* = the Dolphin
   Flow track / *Dolphin Flow*, arm it and record: that gets the chords, but Live drops a VST3 plugin's pitch bends, so
@@ -218,7 +238,11 @@ melodic house pads, tech house stabs, ambient swells, emotional keys.
 </p>
 
 <p align="center">
-  <img src="docs/images/dolphinflow-arrange.png" alt="Dolphin Flow arrange view" width="760">
+  <img src="docs/images/dolphinflow-compose.png" alt="Dolphin Flow compose page: sections, chords and the palette" width="760">
+</p>
+
+<p align="center">
+  <img src="docs/images/dolphinflow-pianoroll.png" alt="Dolphin Flow piano roll with harmonic guides" width="760">
 </p>
 
 > Screenshots from `AA_SCREENSHOT_DIR=docs/images ./build/plugins/dolphinflow/DolphinFlowTests "*renders headlessly"`.

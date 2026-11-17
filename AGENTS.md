@@ -65,7 +65,7 @@ shared/ui/            animalaudio::ui   INTERFACE lib whose .cpp files compile i
   Palette.h           colour roles every widget draws from; makePaletteFromHue(); makeFont(height, bold, kerning)
   Theme.h             Theme { Palette, name, tagline, Motif }; Motif = the animal (mascot, knob cap, ambient, decoration)
   ShaperEditor        optional shared curve-shaper editor (Duck uses it at 820x470); not required for every plugin
-  BrandBadge, PillButton, ChoicePillRow, RotaryKnob/ThemedKnob, CurveEditor, CurvePresetPanel, Drawing.h
+  BrandBadge, PillButton, ChoicePillRow (one row, or wrapped with setColumns), RotaryKnob/ThemedKnob, CurveEditor, CurvePresetPanel, Drawing.h
 shared/m4l/           Max for Live devices for Push 3 standalone (one per plugin, all one design): aamax/ (Python
                       builder: params, ui layout helpers, device spec -> patcher, frozen .amxd), ui/aa_ui.js (the shared
                       jsui kit: theme + widgets, ES5), tests/. Each plugin's port is plugins/<slug>/m4l/ (device.py spec,
@@ -106,10 +106,16 @@ plugins/dolphinflow/  keyboard chord instrument (own processor and editor; the s
                       bends, re-sent on host play/record start), MpePort (virtual "Animal Audio - Dolphin Flow" MIDI port mirroring MIDI out,
                       since Live drops VST3 pitch bend output; FIFO + sender thread; opened only when a host loads the plugin, tests call openMpePort;
                       port note-ons carry MpePort::portVelocity so EchoGuard, a process-wide lock-free ring, ignores them coming
-                      back in on any channel: Live gives a non-MPE plugin all input on channel 1, and an All Ins echo would feed itself), DolphinFlowEditor (computer keys, RootKey piano, glide ribbons)
-  Source/dsp/         Chords (10 qualities, identifyChord), VoiceLeader (least-movement voicing), DolphinFlowEngine
-                      (paraphonic glide synth), Progression (8 arrangement slots, loop maths, settled voicing, clip notes)
-  Source/ui/          ArrangeView (SlotCell squares, LOOP, ClipButton drag/save .mid),
+                      back in on any channel: Live gives a non-MPE plugin all input on channel 1, and an All Ins echo would feed itself), DolphinFlowEditor (KEYS page: computer keys, RootKey piano, glide ribbons; COMPOSE page),
+                      SongIO (song <-> state tree incl. migration from the 8 squares, MIDI clip files per track / selection / song)
+  Source/dsp/         Chords (20 qualities, 10 on number keys, identifyChord), Theory (scales/modes, diatonic chords,
+                      roman numerals, key-aware spelling, the chord palette model), VoiceLeader (least-movement voicing), DolphinFlowEngine
+                      (paraphonic glide synth), Song (sections, chords, melody tracks, harmonic guides, chord relations,
+                      circle palette, chord-track voicing for clips), SongPlayback (PlaySong + SongStore hazard-pointer
+                      hand-off to the audio thread), Progression (kSlotBeats tables the Max for Live device still reads)
+  Source/ui/          ComposeContext (shared selection, TimeAxis, snap, Am|vi), ComposeView (transport, track list
+                      TrackRow, ExportButton), TimelineView (sections, chords, ruler), PaletteView (PaletteCell circles,
+                      borrow bar, relations, matching), PianoRoll (melody editing, harmonic guides, voicing view),
                       DolphinFlowTheme (kThemeHue 218, ocean blue + aqua + coral), DolphinFlowMotif (leaping dolphin,
                       dorsal-fin knob pointer,
                       lake ripples)
@@ -394,22 +400,51 @@ out, no audio input). Roots come from computer keys (editor) or MIDI notes; the 
 - MIDI out (channel 1): after every change the voiced notes are diffed against the notes already out, so only notes
   that leave get note-offs and only new ones note-ons (common tones stay one long note). Release, latch-off and all
   notes off end them. Written into a preallocated buffer swapped into the host's `MidiBuffer`.
-- Arrangement (`dsp/Progression.h`): 8 `Slot`s {root (-1 empty), shape, length index into 1/2/3/4/6/8/12/16 beats},
-  saved as a `Progression` child of `apvts.state` (not parameters) and mirrored in one packed `std::atomic<int>` per
-  slot for the audio thread. Default: Am7 Fmaj7 C G, a bar each. With `loop` on, position in beats is the host PPQ
-  while the host plays, else free-running at the host (or 120) BPM from the moment LOOP turned on; empty slots are
-  skipped. The block is split at slot boundaries (sample-accurate). The first chord after starting uses
-  `settledVoicing` (led once round the loop), so pass one sounds like every later pass and like the exported clip.
-  While looping, keys and MIDI are tracked but the loop owns the engine; MIDI out carries the loop's notes.
-- MIDI clip (`writeMidiClip`): `buildClip` voices one settled pass, ties common tones, 960 ticks per beat, tempo and
-  4/4 meta, end-of-track at the loop length. `ClipButton`: drag = `performExternalDragDropOfFiles`, click = save to
-  `~/Music/Animal Audio/Dolphin Flow/Dolphin Flow - <chords>.mid` and copy the path.
-- Parameters (APVTS, version 1): `chord` (MAJ..MIN9), `mode` (Pad/Stab/Keys), `voices` (3-6, default 4), `octave`
+- Song (`dsp/Song.h`, JUCE-free): sections (name, colour, chords {root, shape, beats}), up to 4 melody tracks
+  (name, role Lead/Bass/Pad/Arp, mute/solo/volume, notes {pitch, start, length, velocity}) and the chord track's mix.
+  Limits: 16 sections, 64 chords, 512 notes a track. Empty sections are tidied away except the last (the drop target).
+  Saved as a `Song` child of `apvts.state` (notes compact in one string per track); an older save's `Progression`
+  squares become one Verse. Default: Verse Am7 Fmaj7 C G, a bar each, empty Lead and Bass. `setSong` sanitises,
+  saves, compiles a `PlaySong` (flattened chords, audible melody notes sorted, mute/solo resolved) and publishes it via
+  `SongStore` (hazard pointer: the audio thread announces the song it reads, retired songs are freed on the message
+  thread by `collectSongs`). Undo / redo are copies of the song (100 deep); drags edit with `undoable = false` and
+  commit once with `pushUndo`.
+- Transport: PLAY (`setPlaying`, from the playhead to the song's end, then home) or LOOP (round and round; on its own
+  it also starts the song from the top) or LINK (`setLinked`, saved as `link`: plays whenever the host plays). While
+  the host plays the position is its PPQ. `seek` moves the playhead (a UI event). Blocks split at chord and loop
+  boundaries; the first chord after a start uses `settledVoicingAt` so pass one sounds like every later pass and like
+  the clip. While the song runs, keys and MIDI are tracked but the song owns the engine.
+- Melody MIDI out: track t on channel 13+t (`kFirstTrackChannel`), notes emitted sample-accurately per stretch
+  (`emitMelody`: cursor into the sorted notes, a fixed `sounding` array, a jump re-seeks and ends what sounds, a
+  note ending exactly at a stretch end goes off at the next stretch's first sample). The chord track keeps channel 1,
+  or MPE member channels 2-12 (`NoteOut::kLastMemberChannel`). `previewNote` sounds a note for 0.35 s.
+- MIDI clips (`SongIO::buildClip`, `writeMidiClip(file, ClipScope)`): the chord track voiced as it plays
+  (`voiceChordTrack`: settled voicings, common tones tied), or a melody track (channel 1), over [from, to), or every
+  track (type-1 file). With MPE on, chord notes get member channels 2-12, an MPE zone RPN on channel 1, 48-semitone
+  bend range, and a note a voice glides into starts bent from the old pitch and follows `glideShape` (GLIDE / CURVE at
+  the host tempo) back to 0. Files go to `~/Music/Animal Audio/Dolphin Flow/Dolphin Flow - <title>.mid`.
+- Key and palette (`dsp/Theory.h`, JUCE-free): 9 scales (major, minor, the other 5 modes, harmonic and melodic minor).
+  `key` / `scale` are home. The palette is 4 rows x 7 degrees: triads, sevenths, colour (the stacked ninth if a shape
+  matches, else sus4 / sus2 / add9 in key, else the triad) and LEADS TO (the V7 of each degree). Borrowing moves the
+  palette `shift` fifths (+-6) round the circle and / or to a parallel mode; saved as `paletteShift` / `paletteScale`
+  (-1 = follow `scale`) on `apvts.state`, not parameters. A chord is "in key" (drawn filled) when every note is in
+  the home scale; numerals and spelling (flats in flat key signatures and for flattened degrees) are against home.
+  Colours: major family `accent`, minor `accentAlt`, other `textDim`. The COMPOSE palette is circles, 7 rows x 7
+  degrees (`circleChord`: V7 of, ninth, add9, seventh, sixth, sus, triad; empty where the scale has no such chord).
+  A palette chord held plays by setting `chord` then pressing its root; in COMPOSE keys `1`-`7` play the triads and
+  the arrows borrow. Relations (`relationBetween`): Strong = a fifth down or a leading tone up into the root, Smooth =
+  two shared notes. Piano roll guides (`guideFor`): root, chord tone (shape intervals 1-2), extension (3+), in key,
+  out of key.
+- Chord shapes past the first ten are appended (saved indices keep meaning), so `Slot::pack` keeps the shape in five
+  bits; `identifyChord` tries the keyed ten first so a shared note set keeps its commoner name (Dm7 over F6).
+- Parameters (APVTS, version 1): `chord` (MAJ..MIN9, then AUG..MMAJ7), `key` (C..B), `scale` (Major..Melodic Minor), `mode` (Pad/Stab/Keys), `voices` (3-6, default 4), `octave`
   (-2..+2), `glide` (0-2000 ms, default 350), `curve`, `tone`, `width`, `space`, `level` (0-100%), `latch`, `loop` (bool).
-- UI (`DolphinFlowEditor`, 960x600): header (dolphin, DOLPHIN FLOW / CHORD GLIDER, chord symbol and voiced notes,
-  KEYS / ARRANGE view tabs (saved as `view` on the state tree), badge); ARRANGE swaps the GLIDE display for `ArrangeView`
-  (a played root writes into the selected square); GLIDE display (5 s of voice-pitch ribbons over C-lines, swell); SOUND knobs (`ThemedKnob`, dorsal-fin cap); ROOT piano with
-  computer-key letters; MODE and VOICES pills; CHORD pills with their number keys, OCTAVE stepper, LATCH. Children never
+- UI (`DolphinFlowEditor`, 1100x720): header (dolphin, DOLPHIN FLOW / CHORD GLIDER, chord symbol, numeral and voiced
+  notes, KEYS / COMPOSE tabs (saved as `view`, 0 keys, anything else compose), badge). COMPOSE (`ComposeView`) hides
+  the keys page and fills the window: song key, transport, BPM, grid, Am | vi, undo / redo across the top; tracks on
+  the left (chord track with CHORDS / VOICING, melody tracks, + ADD NEW TRACK); the timeline (sections, chords,
+  ruler, playhead) with the palette or the piano roll under it; the export drag bottom right. KEYS page: GLIDE display (5 s of voice-pitch ribbons over C-lines, swell); SOUND knobs (`ThemedKnob`, dorsal-fin cap); ROOT piano with
+  computer-key letters and in-key dots; MODE and VOICES pills; CHORD pills in two rows (`ChoicePillRow::setColumns`), the first with their number keys, OCTAVE stepper, LATCH. Children never
   take keyboard focus, so keys always reach the editor; losing focus releases held keys.
 - Limits: paraphonic (one envelope and filter for the chord). Live keeps some keys (space, its own computer MIDI
   keyboard when on); the editor needs focus to hear keys.

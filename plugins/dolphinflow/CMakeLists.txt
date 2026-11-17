@@ -4,9 +4,13 @@ set(DOLPHINFLOW_SOURCES
     Source/MpePort.cpp
     Source/NoteOut.cpp
     Source/dsp/DolphinFlowEngine.cpp
-    Source/ui/ArrangeView.cpp
+    Source/SongIO.cpp
+    Source/ui/ComposeView.cpp
     Source/ui/DolphinFlowMotif.cpp
-    Source/ui/DolphinFlowTheme.cpp)
+    Source/ui/DolphinFlowTheme.cpp
+    Source/ui/PaletteView.cpp
+    Source/ui/PianoRoll.cpp
+    Source/ui/TimelineView.cpp)
 
 aa_add_plugin(DolphinFlow
     PRODUCT_NAME "DolphinFlow"

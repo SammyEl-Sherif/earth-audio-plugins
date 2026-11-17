@@ -20,12 +20,16 @@ NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
 
 def chord_shapes() -> list[tuple[str, str, list[int]]]:
-    """(label, symbol, intervals) from Chords.h, so the device can't drift from the plugin."""
+    """(label, symbol, intervals) from Chords.h, so the device can't drift from the plugin.
+
+    The device has the plugin's first ten shapes (the ones on number keys, kNumKeyedShapes); the plugin appends more
+    after them for its palette and second pill row, which the device does not carry yet."""
     text = (SOURCE / "Chords.h").read_text(encoding="utf-8")
     shapes = [(label, symbol, [int(v) for v in ivs.split(",")])
               for label, symbol, _, ivs in re.findall(r'\{"([^"]*)", "([^"]*)", (\d), \{([\d, ]+)\}\}', text)]
-    assert len(shapes) == 10, f"expected 10 chord shapes in Chords.h, found {len(shapes)}"
-    return shapes
+    keyed = int(re.search(r"kNumKeyedShapes = (\d+);", text).group(1))
+    assert keyed == 10 and len(shapes) >= keyed, f"expected 10 keyed chord shapes in Chords.h, found {keyed}"
+    return shapes[:keyed]
 
 
 def slot_lengths() -> tuple[list[float], list[str]]:

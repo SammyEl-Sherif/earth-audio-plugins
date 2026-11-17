@@ -1,8 +1,8 @@
 #pragma once
 
 #include "DolphinFlowProcessor.h"
-#include "ui/ArrangeView.h"
 #include "ui/DolphinFlowTheme.h"
+#include "ui/ComposeView.h"
 
 #include <animalaudio/ui/BrandBadge.h>
 #include <animalaudio/ui/ChoicePillRow.h>
@@ -33,6 +33,8 @@ public:
 
     bool isBlack() const noexcept;
     void setLit(bool shouldBeLit);
+    /** Marks the key as in the home key (a dot), and the tonic (a larger dot). */
+    void setKeyInfo(bool inKey, bool tonic);
     std::function<void(int)> onPress; // after the root is sent to the processor
 
 private:
@@ -41,13 +43,15 @@ private:
     int pitchClass;
     bool lit = false;
     bool down = false;
+    bool inKey = true;
+    bool isTonic = false;
 };
 
 class DolphinFlowEditor : public juce::AudioProcessorEditor, private juce::Timer
 {
 public:
-    static constexpr int kWidth = 960;
-    static constexpr int kHeight = 600;
+    static constexpr int kWidth = 1100;
+    static constexpr int kHeight = 720;
     static constexpr int kHistory = 150; // ribbon points, 5 s at the 30 Hz refresh
 
     explicit DolphinFlowEditor(DolphinFlowProcessor& owner);
@@ -69,14 +73,14 @@ public:
     juce::Button& getOctaveDownButton() noexcept { return octaveDown; }
     juce::Button& getOctaveUpButton() noexcept { return octaveUp; }
     RootKey& getRootKey(int pitchClass) noexcept { return *rootKeys[static_cast<std::size_t>(pitchClass)]; }
-    ui::ArrangeView& getArrangeView() noexcept { return arrange; }
     juce::Button& getKeysTab() noexcept { return keysTab; }
-    juce::Button& getArrangeTab() noexcept { return arrangeTab; }
+    juce::Button& getComposeTab() noexcept { return composeTab; }
+    ui::ComposeView& getComposeView() noexcept { return compose; }
 
     enum class View
     {
         Keys = 0,
-        Arrange
+        Compose
     };
     View getView() const noexcept { return view; }
     void setView(View newView);
@@ -96,6 +100,7 @@ private:
     void timerCallback() override { refresh(); }
     void stepOctave(int delta);
     void rootPlayed(int pitchClass);
+    void playDegree(int degree, int keyCode);
     void releaseHeldKeys();
     std::unique_ptr<animalaudio::ui::ChoicePillRow> makePills(const juce::ParameterID& id, const juce::String& tooltip,
                                                               bool upperCase);
@@ -122,11 +127,13 @@ private:
     std::unique_ptr<juce::ButtonParameterAttachment> mpeAttachment;
     std::array<std::unique_ptr<RootKey>, 12> rootKeys;
     animalaudio::ui::PillButton keysTab;
-    animalaudio::ui::PillButton arrangeTab;
-    ui::ArrangeView arrange;
+    animalaudio::ui::PillButton composeTab;
+    ui::ComposeView compose;
+    std::vector<juce::Component*> keysPage; // hidden while COMPOSE fills the window
     View view = View::Keys;
 
-    std::array<int, 12> heldKeyCodes{}; // computer key held for each root, 0 when up
+    std::array<int, 12> heldKeyCodes{};               // computer key held for each root, 0 when up
+    std::array<int, dsp::kDegrees> heldDegreeCodes{}; // palette view: number key held for each scale degree
     std::array<std::array<float, dsp::kMaxVoices>, kHistory> history{};
     int historyHead = 0;
     float viewCentre = static_cast<float>(dsp::kDefaultCentre);

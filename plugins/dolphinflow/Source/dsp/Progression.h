@@ -31,17 +31,19 @@ struct Slot
     bool operator!=(const Slot& o) const noexcept { return !(*this == o); }
 
     /** Packed into one int so the audio thread can read a slot through a single atomic. */
-    int pack() const noexcept { return (root < 0 ? 15 : root) | (shape << 4) | (lengthIndex << 8); }
+    int pack() const noexcept { return (root < 0 ? 15 : root) | (shape << 4) | (lengthIndex << 9); }
     static Slot unpack(int packed) noexcept
     {
         Slot s;
         const int r = packed & 15;
         s.root = r > 11 ? -1 : r;
-        s.shape = std::clamp((packed >> 4) & 15, 0, kNumChordShapes - 1);
-        s.lengthIndex = std::clamp((packed >> 8) & 15, 0, kNumSlotLengths - 1);
+        s.shape = std::clamp((packed >> 4) & 31, 0, kNumChordShapes - 1);
+        s.lengthIndex = std::clamp((packed >> 9) & 15, 0, kNumSlotLengths - 1);
         return s;
     }
 };
+
+static_assert(kNumChordShapes <= 32, "Slot::pack keeps the shape in five bits");
 
 using Slots = Slot[kNumSlots];
 

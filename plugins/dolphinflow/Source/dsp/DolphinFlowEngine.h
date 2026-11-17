@@ -24,6 +24,14 @@ inline constexpr float kMaxGlideMs = 2000.0f;
 inline constexpr int kDefaultCentre = 60; // C4, the register the voicings sit around
 inline constexpr int kMaxOctaveShift = 2;
 
+/** Glide shape, 0..1 of the way over 0..1 of the glide time: CURVE 0 is an even slide, 1 a fast start that eases into
+ * the note. Shared with the MIDI clip export so its MPE bends follow the same curve. */
+inline float glideShape(float t, float curve) noexcept
+{
+    const float u = 1.0f - t;
+    return t + curve * ((1.0f - u * u * u) - t);
+}
+
 struct EngineSettings
 {
     Mode mode = Mode::Pad;

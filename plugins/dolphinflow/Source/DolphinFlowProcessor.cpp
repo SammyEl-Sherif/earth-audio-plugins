@@ -6,6 +6,7 @@
 #include <animalaudio/core/TransportReader.h>
 
 #include <algorithm>
+#include <cmath>
 
 namespace dolphinflow
 {
@@ -14,24 +15,28 @@ namespace
 using animalaudio::core::percentParameter;
 using animalaudio::core::unitParameter;
 
-const juce::Identifier kProgression{"Progression"};
-const juce::Identifier kSlot{"Slot"};
-const juce::Identifier kRoot{"root"};
-const juce::Identifier kShape{"shape"};
-const juce::Identifier kLength{"length"};
+const juce::Identifier kPaletteShift{"paletteShift"};
+const juce::Identifier kPaletteScale{"paletteScale"};
+const juce::Identifier kSongNode{"Song"};
+const juce::Identifier kLegacyProgression{"Progression"};
+const juce::Identifier kLink{"link"};
+constexpr std::size_t kUndoDepth = 100;
+constexpr double kPreviewSeconds = 0.35;
 
-/** First open: a deep house staple, Am7 - Fmaj7 - C - G, a bar each. */
-dsp::Slot defaultSlot(int index)
+/** The voicing chord `target` has once the song has gone round once: so the first pass sounds like every later one
+ * (and like the exported clip). Allocation free. */
+dsp::Voicing settledVoicingAt(const dsp::PlaySong& play, int target, int voices, int centre) noexcept
 {
-    static constexpr int roots[] = {9, 5, 0, 7};
-    static constexpr int shapes[] = {4, 3, 0, 0};
-    dsp::Slot slot;
-    if (index < 4)
-    {
-        slot.root = roots[index];
-        slot.shape = shapes[index];
-    }
-    return slot;
+    const auto& chords = play.chords;
+    if (chords.empty() || target < 0 || target >= static_cast<int>(chords.size()))
+        return {};
+    auto v = dsp::VoiceLeader::initial(chords.front().root, chords.front().shape, voices, centre);
+    for (std::size_t i = 1; i < chords.size(); ++i)
+        v = dsp::VoiceLeader::lead(v, chords[i].root, chords[i].shape, voices, centre);
+    for (int i = 0; i <= target; ++i)
+        v = dsp::VoiceLeader::lead(v, chords[static_cast<std::size_t>(i)].root,
+                                   chords[static_cast<std::size_t>(i)].shape, voices, centre);
+    return v;
 }
 
 juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
@@ -58,6 +63,14 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
     layout.add(std::make_unique<juce::AudioParameterBool>(ids::latch, "Latch", false));
     layout.add(std::make_unique<juce::AudioParameterBool>(ids::loop, "Loop", false));
     layout.add(std::make_unique<juce::AudioParameterBool>(ids::mpe, "MPE Out", true));
+    juce::StringArray keys;
+    for (int pc = 0; pc < 12; ++pc)
+        keys.add(dsp::pitchClassName(pc));
+    juce::StringArray scales;
+    for (const auto& scale : dsp::kScales)
+        scales.add(scale.name);
+    layout.add(std::make_unique<juce::AudioParameterChoice>(ids::key, "Key", keys, 0));
+    layout.add(std::make_unique<juce::AudioParameterChoice>(ids::scale, "Scale", scales, 0));
     return layout;
 }
 } // namespace
@@ -79,9 +92,7 @@ DolphinFlowProcessor::DolphinFlowProcessor()
     latchParam = apvts.getRawParameterValue(ids::latch.getParamID());
     loopParam = apvts.getRawParameterValue(ids::loop.getParamID());
     mpeParam = apvts.getRawParameterValue(ids::mpe.getParamID());
-    for (int i = 0; i < dsp::kNumSlots; ++i)
-        slotState[static_cast<std::size_t>(i)].store(defaultSlot(i).pack());
-    loadSlotsFromState();
+    loadSongFromState();
 
     pushSettings();
     engine.prepare(44100.0);
@@ -128,8 +139,11 @@ void DolphinFlowProcessor::prepareToPlay(double sampleRate, int)
     lastPlaying = false;
     lastRecording = false;
     sequencing = false;
-    sequenceSlot = -1;
-    playingSlot.store(-1);
+    sequenceChord = -1;
+    soundingCount = 0;
+    previewCount = 0;
+    melodyPosition = -1.0;
+    playingChord.store(-1);
     midiOut.ensureSize(4096);
     lastShape = currentShape();
     lastLatch = latchParam->load() > 0.5f;
@@ -296,6 +310,22 @@ void DolphinFlowProcessor::drainUiEvents() noexcept
             case UiEvent::Type::ReleaseAllKeys:
                 releaseKeys();
                 break;
+            case UiEvent::Type::Rewind:
+                sequenceBeats = seekTarget.load();
+                sequenceChord = -1; // the first chord starts on its settled voicing
+                melodyPosition = -1.0;
+                break;
+            case UiEvent::Type::Preview:
+                if (previewCount < kMaxPreviews)
+                {
+                    midiOut.addEvent(
+                        juce::MidiMessage::noteOn(event.source, event.root,
+                                                  static_cast<juce::uint8>(std::clamp(event.velocity, 1, 127))),
+                        0);
+                    previews[static_cast<std::size_t>(previewCount++)] = {
+                        event.source, event.root, static_cast<int>(kPreviewSeconds * getSampleRate())};
+                }
+                break;
             }
         }
     };
@@ -303,29 +333,159 @@ void DolphinFlowProcessor::drainUiEvents() noexcept
     handle(scope.startIndex2, scope.blockSize2);
 }
 
-void DolphinFlowProcessor::stepSequencer(const dsp::Slots& slots, double& samplesToBoundary,
-                                         double beatsPerSample) noexcept
+double DolphinFlowProcessor::songPosition(const dsp::PlaySong& play) const noexcept
 {
-    const auto at = dsp::locate(slots, sequenceBeats);
-    if (at.slot < 0)
-        return;
-    const auto& slot = slots[at.slot];
-    // A new square, an edit to the playing one, or the loop coming round on a single square: play it.
-    const bool changed = at.slot != sequenceSlot || slot.root != sequenceChord.root ||
-                         slot.shape != sequenceChord.shape || at.into + 1.0e-9 < sequenceInto;
-    if (changed)
+    if (loopParam->load() > 0.5f && play.length > 0.0)
     {
-        if (sequenceSlot < 0)
-            engine.playChordVoiced(dsp::settledVoicing(slots, at.slot, settledVoices, settledCentre), slot.root,
-                                   slot.shape);
-        else
-            engine.playChord(slot.root, slot.shape);
-        sequenceSlot = at.slot;
-        sequenceChord = slot;
+        const double wrapped = std::fmod(sequenceBeats, play.length);
+        return wrapped < 0.0 ? wrapped + play.length : wrapped;
     }
-    sequenceInto = at.into;
-    samplesToBoundary = std::max(1.0, std::ceil(at.left / beatsPerSample - 1.0e-6));
-    slotProgress.store(static_cast<float>(at.into / slot.beats()), std::memory_order_relaxed);
+    return std::max(0.0, sequenceBeats);
+}
+
+void DolphinFlowProcessor::stepSong(const dsp::PlaySong& play, double& samplesToBoundary,
+                                    double beatsPerSample) noexcept
+{
+    const bool loop = loopParam->load() > 0.5f;
+    const double position = songPosition(play);
+    const int index = position < play.chordLength ? play.chordAt(position) : -1;
+    double left = 0.0;
+    if (index < 0)
+    {
+        // Past the chords (a melody running on) or past the end: the chord track is silent.
+        if (sequenceChord >= 0)
+            engine.release();
+        sequenceChord = -1;
+        sequenceRoot = -1;
+        left = position < play.length ? play.length - position : 1.0e6;
+    }
+    else
+    {
+        const auto& chord = play.chords[static_cast<std::size_t>(index)];
+        // A new chord, an edit to the playing one, or the loop coming round on a single chord: play it.
+        const bool changed = index != sequenceChord || chord.root != sequenceRoot || chord.shape != sequenceShape ||
+                             position + 1.0e-9 < sequenceInto;
+        if (changed)
+        {
+            lastVelocity = play.chordVelocity;
+            if (!play.chordsAudible)
+                engine.release();
+            else if (sequenceChord < 0)
+                engine.playChordVoiced(settledVoicingAt(play, index, settledVoices, settledCentre), chord.root,
+                                       chord.shape);
+            else
+                engine.playChord(chord.root, chord.shape);
+            sequenceChord = index;
+            sequenceRoot = chord.root;
+            sequenceShape = chord.shape;
+        }
+        left = chord.end() - position;
+    }
+    if (loop)
+        left = std::min(left, play.length - position);
+    sequenceInto = position;
+    samplesToBoundary = std::max(1.0, std::ceil(left / beatsPerSample - 1.0e-6));
+}
+
+void DolphinFlowProcessor::melodyOff(int samplePosition) noexcept
+{
+    for (int i = 0; i < soundingCount; ++i)
+        midiOut.addEvent(juce::MidiMessage::noteOff(sounding[static_cast<std::size_t>(i)].channel,
+                                                    sounding[static_cast<std::size_t>(i)].pitch),
+                         samplePosition);
+    soundingCount = 0;
+}
+
+void DolphinFlowProcessor::emitMelody(const dsp::PlaySong& play, double from, double to, int sampleStart,
+                                      double beatsPerSample, int numSamples) noexcept
+{
+    const auto& notes = play.notes;
+    const bool loop = loopParam->load() > 0.5f;
+    if (melodyPosition < 0.0 || std::abs(from - melodyPosition) > 1.0e-6)
+    {
+        // A jump (start, rewind, the host moving): end what sounds and find the first note from here.
+        melodyOff(sampleStart);
+        melodyCursor = static_cast<std::size_t>(std::lower_bound(notes.begin(), notes.end(), from - 1.0e-9,
+                                                                 [](const dsp::PlaySong::Note& n, double beat)
+                                                                 { return n.start < beat; }) -
+                                                notes.begin());
+    }
+    const auto sampleAt = [&](double beat)
+    {
+        return std::clamp(sampleStart + static_cast<int>(std::lround((beat - from) / beatsPerSample)), 0,
+                          std::max(0, numSamples - 1));
+    };
+
+    for (; melodyCursor < notes.size() && notes[melodyCursor].start < to - 1.0e-9; ++melodyCursor)
+    {
+        const auto& n = notes[melodyCursor];
+        const int at = sampleAt(n.start);
+        for (int i = 0; i < soundingCount; ++i)
+            if (sounding[static_cast<std::size_t>(i)].channel == n.channel &&
+                sounding[static_cast<std::size_t>(i)].pitch == n.pitch)
+            {
+                // Same pitch again on the same track: end the old one first so nothing hangs.
+                midiOut.addEvent(juce::MidiMessage::noteOff(n.channel, n.pitch), at);
+                sounding[static_cast<std::size_t>(i)] = sounding[static_cast<std::size_t>(--soundingCount)];
+                break;
+            }
+        if (soundingCount == kMaxSounding)
+            continue;
+        midiOut.addEvent(juce::MidiMessage::noteOn(n.channel, n.pitch, static_cast<juce::uint8>(n.velocity)), at);
+        sounding[static_cast<std::size_t>(soundingCount++)] = {n.channel, n.pitch,
+                                                               loop ? std::min(n.end, play.length) : n.end};
+    }
+    // A note ending exactly at `to` ends at the start of the next stretch (the next block's first sample).
+    for (int i = 0; i < soundingCount;)
+    {
+        auto& s = sounding[static_cast<std::size_t>(i)];
+        if (s.end < to - 1.0e-9)
+        {
+            midiOut.addEvent(juce::MidiMessage::noteOff(s.channel, s.pitch), sampleAt(s.end));
+            s = sounding[static_cast<std::size_t>(--soundingCount)];
+        }
+        else
+        {
+            ++i;
+        }
+    }
+    melodyPosition = to;
+    if (loop && to >= play.length - 1.0e-9)
+    {
+        // Round again: what still sounds ends as the loop restarts.
+        for (int i = 0; i < soundingCount; ++i)
+            sounding[static_cast<std::size_t>(i)].end -= play.length;
+        melodyPosition = 0.0;
+        melodyCursor = 0;
+    }
+}
+
+void DolphinFlowProcessor::stopSequencing() noexcept
+{
+    sequencing = false;
+    sequenceChord = -1;
+    intent = {};
+    engine.release();
+    melodyOff(0);
+    melodyPosition = -1.0;
+}
+
+void DolphinFlowProcessor::sendPreviews(int numSamples) noexcept
+{
+    for (int i = 0; i < previewCount;)
+    {
+        auto& p = previews[static_cast<std::size_t>(i)];
+        if (p.samplesLeft < numSamples)
+        {
+            midiOut.addEvent(juce::MidiMessage::noteOff(p.channel, p.pitch), std::max(0, p.samplesLeft));
+            p = previews[static_cast<std::size_t>(--previewCount)];
+        }
+        else
+        {
+            p.samplesLeft -= numSamples;
+            ++i;
+        }
+    }
 }
 
 void DolphinFlowProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
@@ -346,37 +506,44 @@ void DolphinFlowProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::
 
     pushSettings();
 
-    // The arrangement loop: locked to the host's beat position while it plays, else free-running from the start.
-    dsp::Slot slots[dsp::kNumSlots];
-    for (int i = 0; i < dsp::kNumSlots; ++i)
-        slots[i] = dsp::Slot::unpack(slotState[static_cast<std::size_t>(i)].load(std::memory_order_relaxed));
+    // The song: locked to the host's beat position while the host plays, else running from the playhead.
+    const auto& play = songStore.acquire();
     const auto transport = animalaudio::core::readTransport(getPlayHead());
     const double bpm = animalaudio::dsp::bpmOr(transport, 120.0);
     tempo.store(bpm, std::memory_order_relaxed);
     const double beatsPerSample = bpm / 60.0 / std::max(1.0, getSampleRate());
     const bool hostClock = transport.playing && transport.hasPpq;
-    const bool runLoop = loopParam->load() > 0.5f && dsp::loopBeats(slots) > 0.0;
-    if (runLoop && !sequencing)
+    const bool loop = loopParam->load() > 0.5f;
+    sendPreviews(numSamples);
+    drainUiEvents();
+    const bool runSong = play.length > 0.0 && (transportPlaying.load() || loop || (linked.load() && hostClock));
+    if (runSong && !sequencing)
     {
         sequencing = true;
-        sequenceSlot = -1;
+        sequenceChord = -1;
         sequenceInto = 0.0;
-        sequenceBeats = 0.0;
+        melodyPosition = -1.0;
+        if (!transportPlaying.load())
+            sequenceBeats = 0.0; // LOOP (or the host) starts the song from its top
     }
-    else if (!runLoop && sequencing)
+    else if (!runSong && sequencing)
     {
-        sequencing = false;
-        sequenceSlot = -1;
-        intent = {};
-        engine.release();
+        stopSequencing();
     }
     if (sequencing && hostClock)
         sequenceBeats = transport.ppq;
+    if (sequencing && !loop && !hostClock && sequenceBeats >= play.length)
+    {
+        // PLAY ran to the end of the song: stop, back at the top.
+        transportPlaying.store(false);
+        stopSequencing();
+        sequenceBeats = 0.0;
+    }
     double toBoundary = 0.0;
     if (sequencing)
-        stepSequencer(slots, toBoundary, beatsPerSample); // the square at the block start, before any note goes out
-
-    drainUiEvents();
+        stepSong(play, toBoundary, beatsPerSample); // the chord at the block start, before any note goes out
+    else
+        melodyOff(0);
     if (!sequencing)
         resolve();
 
@@ -425,7 +592,7 @@ void DolphinFlowProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::
         int next = numSamples;
         if (sequencing)
         {
-            stepSequencer(slots, toBoundary, beatsPerSample);
+            stepSong(play, toBoundary, beatsPerSample);
             syncMidiOut(done);
             next = static_cast<int>(std::min<double>(next, done + toBoundary));
         }
@@ -440,11 +607,17 @@ void DolphinFlowProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::
             pointers[channel] = buffer.getWritePointer(channel, done);
         engine.process(pointers, channels, next - done);
         if (sequencing)
+        {
+            const double from = songPosition(play);
+            emitMelody(play, from, from + (next - done) * beatsPerSample, done, beatsPerSample, numSamples);
             sequenceBeats += (next - done) * beatsPerSample;
+        }
         done = next;
     }
     applyMidiAt(numSamples);
-    playingSlot.store(sequencing ? sequenceSlot : -1, std::memory_order_relaxed);
+    playingChord.store(sequencing ? sequenceChord : -1, std::memory_order_relaxed);
+    playhead.store(songPosition(play), std::memory_order_relaxed);
+    sequencingShown.store(sequencing, std::memory_order_relaxed);
     if (noteOut.isMpe())
     {
         mpePort.queue(midiOut, blockStartMs, getSampleRate()); // MPE only: plain channel 1 notes have no glides
@@ -492,92 +665,151 @@ float DolphinFlowProcessor::getParameterValue(const juce::ParameterID& id) const
     return apvts.getRawParameterValue(id.getParamID())->load();
 }
 
-dsp::Slot DolphinFlowProcessor::getSlot(int index) const noexcept
+void DolphinFlowProcessor::publishSong()
 {
-    if (index < 0 || index >= dsp::kNumSlots)
-        return {};
-    return dsp::Slot::unpack(slotState[static_cast<std::size_t>(index)].load(std::memory_order_relaxed));
+    auto node = apvts.state.getChildWithName(kSongNode);
+    if (node.isValid())
+        apvts.state.removeChild(node, nullptr);
+    if (auto legacy = apvts.state.getChildWithName(kLegacyProgression); legacy.isValid())
+        apvts.state.removeChild(legacy, nullptr);
+    apvts.state.appendChild(songToTree(song), nullptr);
+    songStore.publish(dsp::compileSong(song));
 }
 
-void DolphinFlowProcessor::setSlot(int index, const dsp::Slot& slot)
+void DolphinFlowProcessor::loadSongFromState()
 {
-    if (index < 0 || index >= dsp::kNumSlots)
-        return;
-    slotState[static_cast<std::size_t>(index)].store(slot.pack(), std::memory_order_relaxed);
-    auto progression = apvts.state.getOrCreateChildWithName(kProgression, nullptr);
-    while (progression.getNumChildren() < dsp::kNumSlots)
-        progression.appendChild(juce::ValueTree(kSlot), nullptr);
-    auto node = progression.getChild(index);
-    node.setProperty(kRoot, slot.root, nullptr);
-    node.setProperty(kShape, slot.shape, nullptr);
-    node.setProperty(kLength, slot.lengthIndex, nullptr);
+    song = songFromState(apvts.state);
+    undoStack.clear();
+    redoStack.clear();
+    linked.store(static_cast<bool>(apvts.state.getProperty(kLink, false)));
+    publishSong();
 }
 
-void DolphinFlowProcessor::loadSlotsFromState()
+void DolphinFlowProcessor::setSong(const dsp::Song& newSong, bool undoable)
 {
-    const auto progression = apvts.state.getChildWithName(kProgression);
-    for (int i = 0; i < dsp::kNumSlots; ++i)
+    if (undoable)
     {
-        dsp::Slot slot = getSlot(i);
-        if (progression.isValid() && i < progression.getNumChildren())
-        {
-            const auto node = progression.getChild(i);
-            slot.root = std::clamp(static_cast<int>(node.getProperty(kRoot, -1)), -1, 11);
-            slot.shape = std::clamp(static_cast<int>(node.getProperty(kShape, 0)), 0, dsp::kNumChordShapes - 1);
-            slot.lengthIndex = std::clamp(static_cast<int>(node.getProperty(kLength, dsp::kDefaultLengthIndex)), 0,
-                                          dsp::kNumSlotLengths - 1);
-        }
-        setSlot(i, slot); // also writes the tree when the saved state had none
+        undoStack.push_back(song);
+        if (undoStack.size() > kUndoDepth)
+            undoStack.erase(undoStack.begin());
+        redoStack.clear();
     }
+    song = newSong;
+    sanitise(song);
+    publishSong();
 }
 
-bool DolphinFlowProcessor::writeMidiClip(const juce::File& file) const
+bool DolphinFlowProcessor::undo()
 {
-    dsp::Slot slots[dsp::kNumSlots];
-    for (int i = 0; i < dsp::kNumSlots; ++i)
-        slots[i] = getSlot(i);
-    const double total = dsp::loopBeats(slots);
-    if (total <= 0.0)
+    if (undoStack.empty())
         return false;
+    redoStack.push_back(song);
+    song = undoStack.back();
+    undoStack.pop_back();
+    publishSong();
+    return true;
+}
 
-    const int voices =
+bool DolphinFlowProcessor::redo()
+{
+    if (redoStack.empty())
+        return false;
+    undoStack.push_back(song);
+    song = redoStack.back();
+    redoStack.pop_back();
+    publishSong();
+    return true;
+}
+
+void DolphinFlowProcessor::setPlaying(bool shouldPlay)
+{
+    transportPlaying.store(shouldPlay);
+}
+
+void DolphinFlowProcessor::seek(double beats)
+{
+    seekTarget.store(std::max(0.0, beats));
+    playhead.store(std::max(0.0, beats));
+    postUiEvent({UiEvent::Type::Rewind, 0, 0});
+}
+
+void DolphinFlowProcessor::pushUndo(const dsp::Song& before)
+{
+    undoStack.push_back(before);
+    if (undoStack.size() > kUndoDepth)
+        undoStack.erase(undoStack.begin());
+    redoStack.clear();
+}
+
+void DolphinFlowProcessor::setLinked(bool shouldLink)
+{
+    linked.store(shouldLink);
+    apvts.state.setProperty(kLink, shouldLink, nullptr);
+}
+
+void DolphinFlowProcessor::previewNote(int track, int pitch, int velocity)
+{
+    postUiEvent({UiEvent::Type::Preview, dsp::kFirstTrackChannel + std::clamp(track, 0, dsp::kMaxMelodyTracks - 1),
+                 std::clamp(pitch, 0, 127), velocity});
+}
+
+ClipVoicing DolphinFlowProcessor::clipVoicing() const
+{
+    ClipVoicing v;
+    v.voices =
         dsp::kMinVoices + std::clamp(juce::roundToInt(voicesParam->load()), 0, dsp::kMaxVoices - dsp::kMinVoices);
-    const int centre = dsp::kDefaultCentre + 12 * juce::roundToInt(octaveParam->load());
-    constexpr int ticksPerBeat = 960;
-    const auto ticks = [](double beats) { return std::round(beats * ticksPerBeat); };
+    v.centre = dsp::kDefaultCentre + 12 * juce::roundToInt(octaveParam->load());
+    v.mpe = mpeParam->load() > 0.5f;
+    v.bpm = getTempo();
+    v.glideMs = glideParam->load();
+    v.curve = curveParam->load();
+    return v;
+}
 
-    juce::MidiMessageSequence track;
-    track.addEvent(juce::MidiMessage::textMetaEvent(3, "Dolphin Flow"), 0.0);
-    track.addEvent(juce::MidiMessage::tempoMetaEvent(juce::roundToInt(60.0e6 / getTempo())), 0.0);
-    track.addEvent(juce::MidiMessage::timeSignatureMetaEvent(4, 4), 0.0);
-    for (const auto& note : dsp::buildClip(slots, voices, centre))
-    {
-        track.addEvent(
-            juce::MidiMessage::noteOn(NoteOut::kPlainChannel, note.note, static_cast<juce::uint8>(kKeyVelocity)),
-            ticks(note.start));
-        track.addEvent(juce::MidiMessage::noteOff(NoteOut::kPlainChannel, note.note), ticks(note.end));
-    }
-    track.addEvent(juce::MidiMessage::endOfTrack(), ticks(total));
-    track.sort();
-    track.updateMatchedPairs();
-
-    juce::MidiFile midiFile;
-    midiFile.setTicksPerQuarterNote(ticksPerBeat);
-    midiFile.addTrack(track);
+bool DolphinFlowProcessor::writeMidiClip(const juce::File& file, const ClipScope& scope) const
+{
+    const auto midiFile = buildClip(song, scope, clipVoicing());
+    if (midiFile.getNumTracks() == 0)
+        return false;
     if (!file.getParentDirectory().createDirectory())
         return false;
     file.deleteFile();
     juce::FileOutputStream out(file);
-    return out.openedOk() && midiFile.writeTo(out, 1);
+    return out.openedOk() && midiFile.writeTo(out, midiFile.getNumTracks() > 1 ? 1 : 0);
 }
 
-juce::File DolphinFlowProcessor::defaultClipFile() const
+dsp::PaletteKey DolphinFlowProcessor::getPaletteKey() const
 {
-    juce::StringArray names;
-    for (int i = 0; i < dsp::kNumSlots; ++i)
-        if (const auto slot = getSlot(i); !slot.isEmpty())
-            names.add(juce::String(dsp::pitchClassName(slot.root)) + dsp::chordShape(slot.shape).symbol);
-    const auto name = juce::File::createLegalFileName("Dolphin Flow - " + names.joinIntoString(" ") + ".mid");
+    dsp::PaletteKey key;
+    key.homeTonic = std::clamp(juce::roundToInt(getParameterValue(ids::key)), 0, 11);
+    key.homeScale = std::clamp(juce::roundToInt(getParameterValue(ids::scale)), 0, dsp::kNumScales - 1);
+    key.shift = std::clamp(static_cast<int>(apvts.state.getProperty(kPaletteShift, 0)), -dsp::kMaxPaletteShift,
+                           dsp::kMaxPaletteShift);
+    // -1 (or nothing saved) follows the home scale, so changing SCALE moves the palette with it.
+    const int scale = static_cast<int>(apvts.state.getProperty(kPaletteScale, -1));
+    key.scale = scale < 0 ? key.homeScale : std::clamp(scale, 0, dsp::kNumScales - 1);
+    return key;
+}
+
+void DolphinFlowProcessor::setPaletteBorrow(int shift, int scale)
+{
+    const int homeScale = std::clamp(juce::roundToInt(getParameterValue(ids::scale)), 0, dsp::kNumScales - 1);
+    apvts.state.setProperty(kPaletteShift, std::clamp(shift, -dsp::kMaxPaletteShift, dsp::kMaxPaletteShift), nullptr);
+    apvts.state.setProperty(kPaletteScale, scale == homeScale ? -1 : std::clamp(scale, 0, dsp::kNumScales - 1),
+                            nullptr);
+}
+
+unsigned DolphinFlowProcessor::getHomeKeyMask() const
+{
+    const auto key = getPaletteKey();
+    return dsp::scaleMask(key.homeTonic, key.homeScale);
+}
+
+juce::File DolphinFlowProcessor::clipFile(const ClipScope& scope) const
+{
+    const auto key = getPaletteKey();
+    const auto name = juce::File::createLegalFileName("Dolphin Flow - " +
+                                                      clipTitle(song, scope, key.homeTonic, key.homeScale) + ".mid");
     return juce::File::getSpecialLocation(juce::File::userMusicDirectory)
         .getChildFile("Animal Audio")
         .getChildFile("Dolphin Flow")
@@ -596,7 +828,7 @@ void DolphinFlowProcessor::setStateInformation(const void* data, int sizeInBytes
         if (xml->hasTagName(apvts.state.getType()))
         {
             apvts.replaceState(juce::ValueTree::fromXml(*xml));
-            loadSlotsFromState();
+            loadSongFromState();
         }
 }
 

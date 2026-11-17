@@ -4,7 +4,9 @@
 #include "MpePort.h"
 #include "NoteOut.h"
 #include "dsp/DolphinFlowEngine.h"
-#include "dsp/Progression.h"
+#include "SongIO.h"
+#include "dsp/SongPlayback.h"
+#include "dsp/Theory.h"
 
 #include <juce_audio_processors/juce_audio_processors.h>
 
@@ -28,6 +30,8 @@ inline const juce::ParameterID level{"level", 1};
 inline const juce::ParameterID latch{"latch", 1};
 inline const juce::ParameterID loop{"loop", 1};
 inline const juce::ParameterID mpe{"mpe", 1};
+inline const juce::ParameterID key{"key", 1};
+inline const juce::ParameterID scale{"scale", 1};
 } // namespace ids
 
 /**
@@ -77,23 +81,55 @@ public:
     void setParameterFromUi(const juce::ParameterID& id, float realValue);
     float getParameterValue(const juce::ParameterID& id) const;
 
-    // Arrangement: eight chord squares that loop while LOOP is on. Message thread, except the getters marked any.
-    dsp::Slot getSlot(int index) const noexcept; // any thread
-    void setSlot(int index, const dsp::Slot& slot);
-    /** Slot the loop is playing (-1 when not looping) and how far through it, 0..1. Any thread. */
-    int getPlayingSlot() const noexcept { return playingSlot.load(std::memory_order_relaxed); }
-    float getSlotProgress() const noexcept { return slotProgress.load(std::memory_order_relaxed); }
+    // The song: sections of chords plus melody tracks (lead, bass...). Message thread.
+    const dsp::Song& getSong() const noexcept { return song; }
+    /** Replaces the song (sanitised), saves it in the state and hands it to the audio thread. `undoable` pushes the
+     * previous song onto the undo stack. */
+    void setSong(const dsp::Song& newSong, bool undoable = true);
+    /** Pushes `before` as one undo step (a drag edits live with undoable = false, then commits once). */
+    void pushUndo(const dsp::Song& before);
+    bool undo();
+    bool redo();
+    bool canUndo() const noexcept { return !undoStack.empty(); }
+    bool canRedo() const noexcept { return !redoStack.empty(); }
+    /** Frees songs the audio thread has finished with (the editor's timer calls it). */
+    void collectSongs() { songStore.collect(); }
+    const dsp::PlaySong& getPlaySong() const noexcept { return songStore.latest(); }
+
+    // Transport. PLAY runs the song from the playhead (to its end, or round and round with LOOP on). LOOP alone also
+    // runs it. LINK follows the host: the song plays whenever the host plays, at the host's beat position.
+    void setPlaying(bool shouldPlay);
+    bool isPlaying() const noexcept { return transportPlaying.load(); }
+    void rewind() { seek(0.0); }
+    /** Moves the playhead (the host's position wins while it plays). */
+    void seek(double beats);
+    void setLinked(bool shouldLink);
+    bool isLinked() const noexcept { return linked.load(); }
+    /** Where the song is (beats, inside the song), whether it is running, and the chord it plays (-1 none). */
+    double getPlayheadBeats() const noexcept { return playhead.load(std::memory_order_relaxed); }
+    bool isSequencing() const noexcept { return sequencingShown.load(std::memory_order_relaxed); }
+    int getPlayingChord() const noexcept { return playingChord.load(std::memory_order_relaxed); }
     double getTempo() const noexcept { return tempo.load(std::memory_order_relaxed); }
-    /** One pass of the loop as a standard MIDI file, voiced as it plays. False if empty or unwritable. */
-    bool writeMidiClip(const juce::File& file) const;
-    /** ~/Music/Animal Audio/Dolphin Flow/Dolphin Flow - <chords>.mid */
-    juce::File defaultClipFile() const;
+    /** Sounds a melody track's note through MIDI out for a moment (piano roll clicks). */
+    void previewNote(int track, int pitch, int velocity);
+
+    /** A part of the song as a standard MIDI file (see buildClip). False if empty or unwritable. */
+    bool writeMidiClip(const juce::File& file, const ClipScope& scope = {}) const;
+    /** ~/Music/Animal Audio/Dolphin Flow/Dolphin Flow - <title>.mid */
+    juce::File clipFile(const ClipScope& scope = {}) const;
+    ClipVoicing clipVoicing() const;
 
     const dsp::DolphinFlowEngine& getEngine() const noexcept { return engine; }
     /** The virtual MIDI port mirroring MIDI out (empty name where the system can't make one). */
     juce::String getMpePortName() const { return mpePort.getPortName(); }
     /** Message thread: opens the virtual MPE port (prepareToPlay does this when a host loads the plugin). */
     void openMpePort(const juce::String& name = {}) { mpePort.open(name); }
+
+    // Key: the KEY / SCALE parameters are home; the palette can borrow from neighbouring keys and parallel modes.
+    // Message thread. The borrowed position is saved with the plugin state, not automated.
+    dsp::PaletteKey getPaletteKey() const;
+    void setPaletteBorrow(int shift, int scale);
+    unsigned getHomeKeyMask() const;
 
     juce::AudioProcessorValueTreeState apvts;
 
@@ -104,10 +140,13 @@ private:
         {
             Press,
             Release,
-            ReleaseAllKeys
+            ReleaseAllKeys,
+            Rewind,
+            Preview // source = channel, root = pitch, velocity
         } type;
         int source;
         int root;
+        int velocity = 0;
     };
 
     struct Held
@@ -161,8 +200,15 @@ private:
     void rememberSent(const juce::MidiBuffer& buffer) noexcept;
     void drainUiEvents() noexcept;
     void postUiEvent(const UiEvent& event);
-    void loadSlotsFromState();
-    void stepSequencer(const dsp::Slots& slots, double& samplesToBoundary, double beatsPerSample) noexcept;
+    void loadSongFromState();
+    void publishSong();
+    double songPosition(const dsp::PlaySong& play) const noexcept;
+    void stepSong(const dsp::PlaySong& play, double& samplesToBoundary, double beatsPerSample) noexcept;
+    void emitMelody(const dsp::PlaySong& play, double from, double to, int sampleStart, double beatsPerSample,
+                    int numSamples) noexcept;
+    void melodyOff(int samplePosition) noexcept;
+    void stopSequencing() noexcept;
+    void sendPreviews(int numSamples) noexcept;
 
     dsp::DolphinFlowEngine engine;
 
@@ -180,17 +226,49 @@ private:
     int lastShape = 0;
     bool lastLatch = false;
 
-    std::array<std::atomic<int>, dsp::kNumSlots> slotState{};
+    dsp::Song song;
+    std::vector<dsp::Song> undoStack;
+    std::vector<dsp::Song> redoStack;
+    dsp::SongStore songStore;
+
+    std::atomic<bool> transportPlaying{false};
+    std::atomic<double> seekTarget{0.0};
+    std::atomic<bool> linked{false};
     bool sequencing = false;
-    double sequenceBeats = 0.0;
-    int sequenceSlot = -1;
-    dsp::Slot sequenceChord;
+    double sequenceBeats = 0.0; // unwrapped song position
+    int sequenceChord = -1;
+    int sequenceRoot = -1;
+    int sequenceShape = -1;
     double sequenceInto = 0.0;
     int settledVoices = 4;
     int settledCentre = dsp::kDefaultCentre;
-    std::atomic<int> playingSlot{-1};
-    std::atomic<float> slotProgress{0.0f};
+    std::atomic<double> playhead{0.0};
+    std::atomic<bool> sequencingShown{false};
+    std::atomic<int> playingChord{-1};
     std::atomic<double> tempo{120.0};
+
+    // Melody tracks: notes sounding now (MIDI out), and where the next note to start is.
+    struct SoundingNote
+    {
+        int channel;
+        int pitch;
+        double end; // song position (wrapped)
+    };
+    static constexpr int kMaxSounding = 64;
+    std::array<SoundingNote, kMaxSounding> sounding{};
+    int soundingCount = 0;
+    std::size_t melodyCursor = 0;
+    double melodyPosition = -1.0; // wrapped position melody was last emitted up to, -1 = must re-seek
+
+    struct PreviewOff
+    {
+        int channel;
+        int pitch;
+        int samplesLeft;
+    };
+    static constexpr int kMaxPreviews = 16;
+    std::array<PreviewOff, kMaxPreviews> previews{};
+    int previewCount = 0;
 
     std::array<UiEvent, 128> uiEvents{};
     juce::AbstractFifo uiFifo{128};

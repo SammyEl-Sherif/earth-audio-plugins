@@ -12,7 +12,7 @@ namespace dolphinflow
  * Turns what the engine plays into MIDI out, so a track recording it gets the full chord. Common tones stay one
  * long note across a chord change.
  *
- * MPE (lower zone: manager channel 1, one member channel 2-16 per note, 48 semitone bend range, the MPE default):
+ * MPE (lower zone: manager channel 1, one member channel 2-12 per note, 48 semitone bend range, the MPE default):
  * a voice that glides ends its old note and starts the new one on a fresh channel with a pitch bend that begins
  * at the pitch it slid from and follows the engine's glide to zero, so the host's MPE editor shows each glide as
  * that note's pitch curve. Without MPE every note is on channel 1 and glides are not sent.
@@ -24,7 +24,7 @@ class NoteOut
 public:
     static constexpr int kPlainChannel = 1;
     static constexpr int kFirstMemberChannel = 2;
-    static constexpr int kLastMemberChannel = 16;
+    static constexpr int kLastMemberChannel = 12; // 13-16 carry the melody tracks
     static constexpr float kBendRangeSemitones = 48.0f;
     static constexpr int kBendInterval = 64; // samples between pitch bend updates while a glide runs
 
