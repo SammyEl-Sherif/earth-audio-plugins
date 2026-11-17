@@ -8,16 +8,7 @@ namespace
 {
 using animalaudio::ui::makeFont;
 
-constexpr int kNavH = 28;
-constexpr int kDigitsH = 14;
-constexpr int kStripH = 42;
-constexpr int kLabelW = 74;
-constexpr int kGap = 8;
-
-juce::String utf8(const dsp::Label& label)
-{
-    return juce::String::fromUTF8(label.text);
-}
+constexpr int kLabelW = 52;
 
 void arrow(juce::Graphics& g, juce::Rectangle<float> area, juce::Colour colour, bool right)
 {
@@ -47,33 +38,59 @@ juce::String keyName(int tonic, int scale)
 {
     return juce::String(dsp::pitchClassName(tonic, dsp::prefersFlats(tonic, scale))) + " " + dsp::scaleAt(scale).label;
 }
-
-juce::String chordText(const DolphinFlowProcessor& processor, int root, int shape)
-{
-    const auto key = processor.getPaletteKey();
-    return utf8(dsp::chordNameInKey(root, shape, key.homeTonic, key.homeScale));
-}
 } // namespace
 
-juce::Colour qualityColour(const animalaudio::ui::Palette& palette, int shape)
+void drawChordText(juce::Graphics& g, const juce::String& text, juce::Rectangle<float> area, float size,
+                   juce::Colour colour)
 {
-    switch (dsp::shapeTheory(shape).quality)
+    // Base: a leading accidental (numerals), the note letter or roman numeral, its accidental, a minor "m" (not
+    // "maj"). The rest (7, add9, 7/ii...) is set small and raised, with maj as a triangle.
+    const int length = text.length();
+    int split = 0;
+    if (split < length && (text[split] == 'b' || text[split] == '#') && length > 1 &&
+        juce::String("IViv").containsChar(text[1]))
+        ++split;
+    if (split < length && juce::String("ABCDEFG").containsChar(text[split]))
     {
-    case dsp::Quality::Major:
-        return palette.accent;
-    case dsp::Quality::Minor:
-        return palette.accentAlt;
-    case dsp::Quality::Other:
-        break;
+        ++split;
+        if (split < length && (text[split] == '#' || text[split] == 'b'))
+            ++split;
+        if (split < length && text[split] == 'm' && !text.substring(split).startsWith("maj"))
+            ++split;
     }
-    return palette.textDim;
+    else
+    {
+        while (split < length && juce::String("IViv").containsChar(text[split]))
+            ++split;
+    }
+    split = std::max(1, std::min(split, length));
+    const auto base = text.substring(0, split);
+    const auto raised = text.substring(split).replace("maj", juce::String::fromUTF8("\xce\x94"));
+
+    const auto baseFont = makeFont(size, true, 0.0f);
+    const auto raisedFont = makeFont(size * 0.66f, true, 0.0f);
+    const float baseW = juce::GlyphArrangement::getStringWidth(baseFont, base);
+    const float raisedW = juce::GlyphArrangement::getStringWidth(raisedFont, raised);
+    const float total = baseW + raisedW + 1.0f;
+    juce::Graphics::ScopedSaveState state(g);
+    if (total > area.getWidth() && total > 0.0f)
+    {
+        const float scale = area.getWidth() / total;
+        g.addTransform(juce::AffineTransform::scale(scale, scale, area.getCentreX(), area.getCentreY()));
+    }
+    const float x = area.getCentreX() - total * 0.5f;
+    const float baseline = area.getCentreY() + size * 0.36f;
+    g.setColour(colour);
+    g.setFont(baseFont);
+    g.drawSingleLineText(base, juce::roundToInt(x), juce::roundToInt(baseline));
+    g.setFont(raisedFont);
+    g.drawSingleLineText(raised, juce::roundToInt(x + baseW + 1.0f), juce::roundToInt(baseline - size * 0.42f));
 }
 
 // ---------------------------------------------------------------------------------------------------------------
 
-PaletteCell::PaletteCell(DolphinFlowProcessor& p, const animalaudio::ui::Palette& palette, int r, int d)
-    : processor(p)
-    , colours(palette)
+PaletteCell::PaletteCell(ComposeContext& context, int r, int d)
+    : ctx(context)
     , row(r)
     , degree(d)
 {
@@ -82,7 +99,7 @@ PaletteCell::PaletteCell(DolphinFlowProcessor& p, const animalaudio::ui::Palette
 
 int PaletteCell::source() const noexcept
 {
-    return DolphinFlowProcessor::kKeySourceBase + 200 + row * dsp::kPaletteColumns + degree;
+    return DolphinFlowProcessor::kKeySourceBase + 200 + row * dsp::kDegrees + degree;
 }
 
 juce::var PaletteCell::describe(int root, int shape)
@@ -105,17 +122,20 @@ bool PaletteCell::parse(const juce::var& description, int& root, int& shape)
 
 void PaletteCell::setChord(const dsp::PaletteChord& newChord)
 {
-    const bool changed = newChord.root != chord.root || newChord.shape != chord.shape ||
-                         newChord.inKey != chord.inKey || std::strcmp(newChord.numeral.text, chord.numeral.text) != 0;
     chord = newChord;
-    if (changed)
+    if (isEmpty())
     {
-        setTooltip(chordText(processor, chord.root, chord.shape) + "  (" + utf8(chord.numeral) + ")" +
-                   (chord.inKey ? "" : ", borrows a note from outside the key") +
-                   ". Hold to play, drag onto a square below to add it, or double-click to put it in the selected "
-                   "square.");
-        repaint();
+        setTooltip({});
     }
+    else
+    {
+        const auto k = ctx.key();
+        setTooltip(juce::String::fromUTF8(dsp::chordNameInKey(chord.root, chord.shape, k.homeTonic, k.homeScale).text) +
+                   "  (" + juce::String::fromUTF8(chord.numeral.text) + ")" +
+                   (chord.inKey ? "" : ", borrows a note from outside the key") +
+                   ". Hold to play, drag onto the timeline, or double-click to add it after the selection.");
+    }
+    repaint();
 }
 
 void PaletteCell::setLit(bool shouldBeLit)
@@ -130,12 +150,14 @@ void PaletteCell::setLit(bool shouldBeLit)
 void PaletteCell::mouseDown(const juce::MouseEvent& e)
 {
     dragging = false;
-    if (e.mods.isPopupMenu())
+    if (isEmpty() || e.mods.isPopupMenu())
         return;
-    processor.setParameterFromUi(ids::chord, static_cast<float>(chord.shape));
-    processor.pressRoot(source(), chord.root);
+    ctx.processor.setParameterFromUi(ids::chord, static_cast<float>(chord.shape));
+    ctx.processor.pressRoot(source(), chord.root);
+    ctx.focusRoot = chord.root;
+    ctx.focusShape = chord.shape;
     playing = true;
-    repaint();
+    ctx.changed();
 }
 
 void PaletteCell::stop()
@@ -143,13 +165,13 @@ void PaletteCell::stop()
     if (!playing)
         return;
     playing = false;
-    processor.releaseRoot(source());
+    ctx.processor.releaseRoot(source());
     repaint();
 }
 
 void PaletteCell::mouseDrag(const juce::MouseEvent& e)
 {
-    if (dragging || e.getDistanceFromDragStart() < 6)
+    if (isEmpty() || dragging || e.getDistanceFromDragStart() < 6)
         return;
     if (auto* container = juce::DragAndDropContainer::findParentDragContainerFor(this))
     {
@@ -171,436 +193,282 @@ void PaletteCell::mouseUp(const juce::MouseEvent&)
 
 void PaletteCell::mouseDoubleClick(const juce::MouseEvent&)
 {
-    if (onWrite)
-        onWrite(chord);
+    write();
+}
+
+void PaletteCell::write()
+{
+    if (isEmpty())
+        return;
+    const int root = chord.root;
+    const int shape = chord.shape;
+    int after = -1;
+    for (int i : ctx.selectedChords)
+        after = std::max(after, i);
+    ctx.edit(
+        [&](dsp::Song& song)
+        {
+            const auto chords = dsp::placeChords(song);
+            dsp::InsertPoint at;
+            if (after >= 0 && after < static_cast<int>(chords.size()))
+                at = {chords[static_cast<std::size_t>(after)].section,
+                      chords[static_cast<std::size_t>(after)].index + 1};
+            else
+                at = {static_cast<int>(song.sections.size()) - 1,
+                      static_cast<int>(song.sections.empty() ? 0 : song.sections.back().chords.size())};
+            dsp::insertChord(song, at, {root, shape, 4.0});
+        });
+    // The new chord becomes the selection, so the next double-click follows it.
+    ctx.selectedChords = {after >= 0 ? after + 1 : dsp::countChords(ctx.processor.getSong()) - 1};
+    ctx.changed();
 }
 
 void PaletteCell::paint(juce::Graphics& g)
 {
+    if (isEmpty())
+        return;
+    const auto& palette = ctx.theme.palette;
     const auto bounds = getLocalBounds().toFloat();
-    const auto area =
-        bounds.withSizeKeepingCentre(std::min(bounds.getWidth() - 8.0f, 84.0f), bounds.getHeight() - 6.0f);
-    const float radius = area.getHeight() * 0.5f;
-    const auto colour = qualityColour(colours, chord.shape);
+    const float d = std::min(bounds.getWidth(), bounds.getHeight()) - 6.0f;
+    const auto circle = bounds.withSizeKeepingCentre(d, d);
+    const auto colour = ctx.chordColour(chord.shape);
     const bool on = lit || playing;
     const bool hover = isMouseOver(true);
 
+    // Relations ring what follows the focused chord; matching dims what lacks the melody's notes.
+    auto relation = dsp::Relation::None;
+    const bool focused = chord.root == ctx.focusRoot && chord.shape == ctx.focusShape;
+    if (ctx.relations && ctx.focusRoot >= 0)
+        relation = dsp::relationBetween(ctx.focusRoot, ctx.focusShape, chord.root, chord.shape);
+    const bool dimmed = (ctx.matchMask != 0 && !dsp::chordContains(chord.root, chord.shape, ctx.matchMask)) ||
+                        (ctx.relations && ctx.focusRoot >= 0 && relation == dsp::Relation::None && !focused);
+    const float alpha = dimmed ? 0.28f : 1.0f;
+
     if (on)
     {
-        g.setColour(colour.withAlpha(0.28f));
-        g.fillRoundedRectangle(area.expanded(3.0f), radius + 3.0f);
+        g.setColour(colour.withAlpha(0.3f));
+        g.fillEllipse(circle.expanded(3.0f));
     }
-    g.setColour(juce::Colours::black.withAlpha(0.32f));
-    g.fillRoundedRectangle(area.translated(0.0f, 2.0f), radius);
-
-    juce::Colour ink;
     if (chord.inKey)
     {
-        const auto face = on ? colour.brighter(0.2f) : colour.withMultipliedBrightness(hover ? 0.95f : 0.82f);
-        g.setGradientFill(juce::ColourGradient(face.brighter(0.08f), 0.0f, area.getY(), face.darker(0.18f), 0.0f,
-                                               area.getBottom(), false));
-        g.fillRoundedRectangle(area, radius);
-        ink = colours.onAccent;
+        const auto face = on ? colour.brighter(0.15f) : colour.withMultipliedBrightness(hover ? 0.92f : 0.72f);
+        g.setGradientFill(juce::ColourGradient(face.brighter(0.1f).withMultipliedAlpha(alpha), circle.getCentreX(),
+                                               circle.getY(), face.darker(0.25f).withMultipliedAlpha(alpha),
+                                               circle.getCentreX(), circle.getBottom(), false));
+        g.fillEllipse(circle);
     }
     else
     {
-        g.setColour(on ? colour.withAlpha(0.35f) : colours.panelRaised.withAlpha(hover ? 1.0f : 0.7f));
-        g.fillRoundedRectangle(area, radius);
-        g.setColour(colour.withAlpha(on ? 1.0f : 0.85f));
-        g.drawRoundedRectangle(area.reduced(0.8f), radius, 1.6f);
-        ink = on ? colours.text : colour.brighter(0.15f);
+        g.setColour((on ? colour.withAlpha(0.35f) : palette.panelRaised.withAlpha(hover ? 0.9f : 0.55f))
+                        .withMultipliedAlpha(alpha));
+        g.fillEllipse(circle);
+        g.setColour(colour.withAlpha(0.9f * alpha));
+        g.drawEllipse(circle.reduced(0.8f), 1.6f);
     }
-
-    const auto text = area.reduced(radius * 0.5f, 3.0f);
-    g.setColour(ink);
-    g.setFont(makeFont(13.5f, true, 0.0f));
-    g.drawFittedText(chordText(processor, chord.root, chord.shape),
-                     text.withTrimmedBottom(text.getHeight() * 0.42f).toNearestInt(),
-                     juce::Justification::centredBottom, 1, 0.75f);
-    g.setColour(ink.withAlpha(0.72f));
-    g.setFont(makeFont(10.0f, true, 0.04f));
-    g.drawFittedText(utf8(chord.numeral), text.withTrimmedTop(text.getHeight() * 0.6f).toNearestInt(),
-                     juce::Justification::centredTop, 1, 0.7f);
-}
-
-// ---------------------------------------------------------------------------------------------------------------
-
-StripCell::StripCell(DolphinFlowProcessor& p, const animalaudio::ui::Palette& palette, int i)
-    : processor(p)
-    , colours(palette)
-    , index(i)
-{
-    setMouseClickGrabsKeyboardFocus(false);
-    setTooltip("Square " + juce::String(i + 1) +
-               " of the loop. Drop a chord from the palette here, or select it and double-click a chord. Right-click "
-               "empties it.");
-}
-
-void StripCell::setSelected(bool shouldBeSelected)
-{
-    if (selected != shouldBeSelected)
+    if (relation != dsp::Relation::None || (ctx.relations && focused))
     {
-        selected = shouldBeSelected;
-        repaint();
-    }
-}
-
-void StripCell::mouseDown(const juce::MouseEvent& e)
-{
-    if (e.mods.isPopupMenu())
-    {
-        auto slot = processor.getSlot(index);
-        slot.root = -1;
-        processor.setSlot(index, slot);
-        repaint();
-        return;
-    }
-    if (onSelect)
-        onSelect(index);
-}
-
-bool StripCell::isInterestedInDragSource(const SourceDetails& details)
-{
-    int root = 0, shape = 0;
-    return PaletteCell::parse(details.description, root, shape);
-}
-
-void StripCell::itemDragEnter(const SourceDetails&)
-{
-    hovered = true;
-    repaint();
-}
-
-void StripCell::itemDragExit(const SourceDetails&)
-{
-    hovered = false;
-    repaint();
-}
-
-void StripCell::itemDropped(const SourceDetails& details)
-{
-    hovered = false;
-    int root = 0, shape = 0;
-    if (PaletteCell::parse(details.description, root, shape))
-    {
-        auto slot = processor.getSlot(index);
-        slot.root = root;
-        slot.shape = shape;
-        processor.setSlot(index, slot);
-        if (onDropped)
-            onDropped(index);
-    }
-    repaint();
-}
-
-void StripCell::paint(juce::Graphics& g)
-{
-    const auto slot = processor.getSlot(index);
-    const bool playing = processor.getPlayingSlot() == index;
-    const auto area = getLocalBounds().toFloat().reduced(1.5f);
-    constexpr float radius = 7.0f;
-
-    g.setColour(juce::Colours::black.withAlpha(0.3f));
-    g.fillRoundedRectangle(area.translated(0.0f, 2.0f), radius);
-    g.setColour(playing ? colours.accent.withMultipliedBrightness(0.42f) : colours.panelRaised);
-    g.fillRoundedRectangle(area, radius);
-    if (playing)
-    {
-        juce::Graphics::ScopedSaveState clip(g);
-        juce::Path shape;
-        shape.addRoundedRectangle(area, radius);
-        g.reduceClipRegion(shape);
-        g.setColour(colours.accent.withAlpha(0.22f));
-        g.fillRect(area.withWidth(area.getWidth() * processor.getSlotProgress()));
-    }
-    if (!slot.isEmpty())
-    {
-        // A thin bar in the chord's quality colour, like the palette.
-        g.setColour(qualityColour(colours, slot.shape).withAlpha(0.9f));
-        g.fillRoundedRectangle(area.getX() + 6.0f, area.getBottom() - 5.0f, area.getWidth() - 12.0f, 2.5f, 1.2f);
-    }
-    g.setColour(hovered ? colours.text : selected ? colours.accent : colours.outline);
-    g.drawRoundedRectangle(area, radius, hovered || selected ? 2.0f : 1.0f);
-
-    g.setColour(colours.textDim);
-    g.setFont(makeFont(9.0f, true, 0.1f));
-    g.drawText(juce::String(index + 1), area.reduced(6.0f, 4.0f), juce::Justification::topLeft, false);
-
-    const auto body = area.reduced(8.0f, 4.0f).withTrimmedLeft(6.0f);
-    if (slot.isEmpty())
-    {
-        g.setColour(colours.textDim.withAlpha(0.55f));
-        g.setFont(makeFont(9.5f, true, 0.18f));
-        g.drawText(hovered ? "DROP" : "EMPTY", body, juce::Justification::centred, false);
-        return;
-    }
-    const auto key = processor.getPaletteKey();
-    g.setColour(playing ? colours.text : colours.text.withAlpha(0.92f));
-    g.setFont(makeFont(13.0f, true, 0.0f));
-    g.drawFittedText(chordText(processor, slot.root, slot.shape), body.withTrimmedBottom(13.0f).toNearestInt(),
-                     juce::Justification::centredBottom, 1, 0.7f);
-    g.setColour(colours.textDim);
-    g.setFont(makeFont(9.0f, true, 0.06f));
-    g.drawFittedText(utf8(dsp::romanNumeral(slot.root, slot.shape, key.homeTonic, key.homeScale)),
-                     body.withTrimmedTop(body.getHeight() - 15.0f).withTrimmedBottom(3.0f).toNearestInt(),
-                     juce::Justification::centred, 1, 0.7f);
-}
-
-// ---------------------------------------------------------------------------------------------------------------
-
-PaletteView::PaletteView(DolphinFlowProcessor& p, const animalaudio::ui::Theme& themeToUse, ArrangeView& arrangeView)
-    : processor(p)
-    , theme(themeToUse)
-    , arrange(arrangeView)
-    , keyButton("C", themeToUse.palette)
-    , scaleButton("MAJOR", themeToUse.palette)
-    , prevButton({}, themeToUse.palette)
-    , borrowButton({}, themeToUse.palette)
-    , nextButton({}, themeToUse.palette)
-    , homeButton({}, themeToUse.palette)
-    , loopButton("LOOP", themeToUse.palette)
-{
-    const auto& palette = theme.palette;
-    for (int row = 0; row < dsp::kPaletteRows; ++row)
-        for (int degree = 0; degree < dsp::kPaletteColumns; ++degree)
+        g.setColour(relation == dsp::Relation::Smooth ? palette.text.withAlpha(0.55f) : palette.text);
+        if (relation == dsp::Relation::Smooth)
         {
-            auto cell = std::make_unique<PaletteCell>(processor, palette, row, degree);
-            cell->onWrite = [this](const dsp::PaletteChord& chord)
-            {
-                arrange.writeSelected(chord.root, chord.shape);
-                refresh();
-            };
-            addAndMakeVisible(*cell);
-            cells[static_cast<std::size_t>(row * dsp::kPaletteColumns + degree)] = std::move(cell);
+            juce::Path ring;
+            ring.addEllipse(circle.expanded(2.5f));
+            juce::Path dashed;
+            const float dashes[] = {3.0f, 3.0f};
+            juce::PathStrokeType(1.5f).createDashedStroke(dashed, ring, dashes, 2);
+            g.fillPath(dashed);
         }
-    for (int i = 0; i < dsp::kNumSlots; ++i)
-    {
-        auto cell = std::make_unique<StripCell>(processor, palette, i);
-        cell->onSelect = [this](int index) { select(index); };
-        cell->onDropped = [this](int index) { select((index + 1) % dsp::kNumSlots); };
-        addAndMakeVisible(*cell);
-        strip[static_cast<std::size_t>(i)] = std::move(cell);
+        else
+        {
+            g.drawEllipse(circle.expanded(2.5f), focused ? 1.0f : 2.2f);
+        }
     }
+    const auto ink = (chord.inKey ? palette.onAccent : colour.brighter(0.25f)).withMultipliedAlpha(alpha);
+    const auto label =
+        ctx.numerals ? juce::String::fromUTF8(chord.numeral.text) : ctx.chordLabel(chord.root, chord.shape);
+    drawChordText(g, label, circle.reduced(d * 0.12f, 0.0f), std::clamp(d * 0.27f, 10.0f, 16.0f), ink);
+}
 
-    keyButton.setTooltip("Home key of the song. The palette, the numerals and the on-screen keys follow it.");
-    scaleButton.setTooltip("Home scale (mode) of the song.");
-    prevButton.setTooltip("Borrow from the key a fifth down (one more flat). Further from home sounds more exotic.");
-    nextButton.setTooltip("Borrow from the key a fifth up (one more sharp).");
-    borrowButton.setTooltip("Where the palette is borrowing from. Click to switch to a parallel mode.");
+// ---------------------------------------------------------------------------------------------------------------
+
+PaletteView::PaletteView(ComposeContext& context)
+    : ctx(context)
+    , homeButton({}, context.theme.palette)
+    , prevButton({}, context.theme.palette)
+    , borrowButton({}, context.theme.palette)
+    , nextButton({}, context.theme.palette)
+    , relationsButton("CHORD RELATIONS", context.theme.palette)
+    , matchButton("MATCHING NOTES", context.theme.palette)
+{
+    for (int row = 0; row < dsp::kCircleRows; ++row)
+        for (int degree = 0; degree < dsp::kDegrees; ++degree)
+        {
+            auto cell = std::make_unique<PaletteCell>(ctx, row, degree);
+            addAndMakeVisible(*cell);
+            cells[static_cast<std::size_t>(row * dsp::kDegrees + degree)] = std::move(cell);
+        }
     homeButton.setTooltip("Back to the home key.");
-    loopButton.setTooltip("Play the squares in order, round and round. Follows the host's beat while it plays.");
+    prevButton.setTooltip("Borrow from the key a fifth down (one more flat). Further from home is more exotic.");
+    nextButton.setTooltip("Borrow from the key a fifth up (one more sharp).");
+    borrowButton.setTooltip("The key the palette shows. Click to switch to a parallel mode.");
+    relationsButton.setTooltip("Ring the chords that follow the one you last clicked: solid = strong pull (a fifth "
+                               "down, a leading tone), dashed = smooth (two shared notes).");
+    matchButton.setTooltip("Showing only chords that contain the melody notes you sent here. Click to clear.");
     prevButton.glyph = [](juce::Graphics& g, juce::Rectangle<float> r, juce::Colour c) { arrow(g, r, c, false); };
     nextButton.glyph = [](juce::Graphics& g, juce::Rectangle<float> r, juce::Colour c) { arrow(g, r, c, true); };
     homeButton.glyph = [](juce::Graphics& g, juce::Rectangle<float> r, juce::Colour c) { house(g, r, c); };
-    keyButton.onClick = [this] { showKeyMenu(); };
-    scaleButton.onClick = [this] { showScaleMenu(true); };
-    borrowButton.onClick = [this] { showScaleMenu(false); };
     prevButton.onClick = [this] { borrow(-1); };
     nextButton.onClick = [this] { borrow(1); };
     homeButton.onClick = [this] { goHome(); };
-    for (auto* button : {&keyButton, &scaleButton, &prevButton, &borrowButton, &nextButton, &homeButton})
+    borrowButton.onClick = [this] { showScaleMenu(); };
+    relationsButton.onClick = [this]
     {
-        button->setClickingTogglesState(false);
-        addAndMakeVisible(*button);
+        ctx.relations = !ctx.relations;
+        ctx.changed();
+    };
+    matchButton.onClick = [this]
+    {
+        ctx.matchMask = 0;
+        ctx.changed();
+    };
+    for (auto* b : {&homeButton, &prevButton, &borrowButton, &nextButton, &relationsButton, &matchButton})
+    {
+        b->setClickingTogglesState(false);
+        b->setMouseClickGrabsKeyboardFocus(false);
+        addChildComponent(*b);
+        b->setVisible(b != &matchButton);
     }
-    loopAttachment = std::make_unique<juce::ButtonParameterAttachment>(
-        *processor.apvts.getParameter(ids::loop.getParamID()), loopButton);
-    loopButton.setClickingTogglesState(true);
-    addAndMakeVisible(loopButton);
 
-    for (auto* child : getChildren())
-        child->setMouseClickGrabsKeyboardFocus(false);
-
-    menuLook.setColour(juce::PopupMenu::backgroundColourId, palette.panel);
-    menuLook.setColour(juce::PopupMenu::textColourId, palette.text);
-    menuLook.setColour(juce::PopupMenu::headerTextColourId, palette.textDim);
-    menuLook.setColour(juce::PopupMenu::highlightedBackgroundColourId, palette.accent);
-    menuLook.setColour(juce::PopupMenu::highlightedTextColourId, palette.onAccent);
-
+    const auto& p = ctx.theme.palette;
+    menuLook.setColour(juce::PopupMenu::backgroundColourId, p.panel);
+    menuLook.setColour(juce::PopupMenu::textColourId, p.text);
+    menuLook.setColour(juce::PopupMenu::headerTextColourId, p.textDim);
+    menuLook.setColour(juce::PopupMenu::highlightedBackgroundColourId, p.accent);
+    menuLook.setColour(juce::PopupMenu::highlightedTextColourId, p.onAccent);
     refresh();
 }
 
 PaletteView::~PaletteView()
 {
-    // An open key / scale menu draws with menuLook, which goes with us.
     juce::PopupMenu::dismissAllActiveMenus();
 }
 
 PaletteCell& PaletteView::getCell(int row, int degree) noexcept
 {
-    return *cells[static_cast<std::size_t>(std::clamp(row, 0, dsp::kPaletteRows - 1) * dsp::kPaletteColumns +
-                                           std::clamp(degree, 0, dsp::kPaletteColumns - 1))];
-}
-
-void PaletteView::select(int index)
-{
-    arrange.select(index);
-    refresh();
+    return *cells[static_cast<std::size_t>(std::clamp(row, 0, dsp::kCircleRows - 1) * dsp::kDegrees +
+                                           std::clamp(degree, 0, dsp::kDegrees - 1))];
 }
 
 void PaletteView::borrow(int steps)
 {
-    const auto key = processor.getPaletteKey();
-    processor.setPaletteBorrow(key.shift + steps, key.scale);
-    refresh();
+    const auto key = ctx.key();
+    ctx.processor.setPaletteBorrow(key.shift + steps, key.scale);
+    ctx.changed();
 }
 
 void PaletteView::goHome()
 {
-    const auto key = processor.getPaletteKey();
-    processor.setPaletteBorrow(0, key.homeScale);
-    refresh();
+    ctx.processor.setPaletteBorrow(0, ctx.key().homeScale);
+    ctx.changed();
 }
 
 void PaletteView::setPaletteScale(int scale)
 {
-    processor.setPaletteBorrow(processor.getPaletteKey().shift, scale);
-    refresh();
+    ctx.processor.setPaletteBorrow(ctx.key().shift, scale);
+    ctx.changed();
 }
 
-void PaletteView::showKeyMenu()
+void PaletteView::showScaleMenu()
 {
-    const int current = processor.getPaletteKey().homeTonic;
+    const auto key = ctx.key();
     juce::PopupMenu menu;
     menu.setLookAndFeel(&menuLook);
-    menu.addSectionHeader("HOME KEY");
-    for (int pc = 0; pc < 12; ++pc)
-        menu.addItem(pc + 1,
-                     juce::String(dsp::pitchClassName(pc)) + (dsp::pitchClassName(pc)[1] == '#'
-                                                                  ? juce::String(" / ") + dsp::pitchClassName(pc, true)
-                                                                  : juce::String()),
-                     true, pc == current);
+    menu.addSectionHeader("BORROW FROM A PARALLEL MODE");
+    for (int s = 0; s < dsp::kNumScales; ++s)
+        menu.addItem(s + 1, keyName(key.tonic(), s), true, s == key.scale);
     juce::Component::SafePointer<PaletteView> safe(this);
-    menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&keyButton),
+    menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&borrowButton),
                        [safe](int result)
                        {
-                           if (safe == nullptr || result <= 0)
-                               return;
-                           safe->processor.setParameterFromUi(ids::key, static_cast<float>(result - 1));
-                           safe->refresh();
-                       });
-}
-
-void PaletteView::showScaleMenu(bool home)
-{
-    const auto key = processor.getPaletteKey();
-    const int current = home ? key.homeScale : key.scale;
-    juce::PopupMenu menu;
-    menu.setLookAndFeel(&menuLook);
-    menu.addSectionHeader(home ? "HOME SCALE" : "BORROW FROM THE PARALLEL MODE");
-    for (int s = 0; s < dsp::kNumScales; ++s)
-        menu.addItem(s + 1, home ? juce::String(dsp::kScales[s].name) : keyName(key.tonic(), s), true, s == current);
-    juce::Component::SafePointer<PaletteView> safe(this);
-    menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(home ? &scaleButton : &borrowButton),
-                       [safe, home](int result)
-                       {
-                           if (safe == nullptr || result <= 0)
-                               return;
-                           if (home)
-                           {
-                               // A new home scale brings the palette home too.
-                               safe->processor.setParameterFromUi(ids::scale, static_cast<float>(result - 1));
-                               safe->processor.setPaletteBorrow(0, result - 1);
-                               safe->refresh();
-                           }
-                           else
-                           {
+                           if (safe != nullptr && result > 0)
                                safe->setPaletteScale(result - 1);
-                           }
                        });
 }
 
 void PaletteView::refresh()
 {
-    const auto key = processor.getPaletteKey();
+    const auto key = ctx.key();
     const bool keyChanged = key.homeTonic != shown.homeTonic || key.homeScale != shown.homeScale ||
                             key.shift != shown.shift || key.scale != shown.scale;
-    shown = key;
-    if (keyChanged || !filled)
+    if (keyChanged || !filled || shownNumerals != ctx.numerals)
     {
         filled = true;
-        keyButton.setButtonText(dsp::pitchClassName(key.homeTonic, dsp::prefersFlats(key.homeTonic, key.homeScale)));
-        scaleButton.setButtonText(dsp::scaleAt(key.homeScale).label);
+        shown = key;
+        shownNumerals = ctx.numerals;
         const auto shift = key.shift == 0 ? juce::String() : (key.shift > 0 ? "  +" : "  ") + juce::String(key.shift);
         borrowButton.setButtonText(keyName(key.tonic(), key.scale) + shift);
         borrowButton.setToggleState(!key.isHome(), juce::dontSendNotification);
         homeButton.setEnabled(!key.isHome());
         prevButton.setEnabled(key.shift > -dsp::kMaxPaletteShift);
         nextButton.setEnabled(key.shift < dsp::kMaxPaletteShift);
-        for (int row = 0; row < dsp::kPaletteRows; ++row)
-            for (int degree = 0; degree < dsp::kPaletteColumns; ++degree)
-                getCell(row, degree).setChord(dsp::paletteChord(key, row, degree));
-        repaint();
+        for (int row = 0; row < dsp::kCircleRows; ++row)
+            for (int degree = 0; degree < dsp::kDegrees; ++degree)
+                getCell(row, degree).setChord(dsp::circleChord(key, row, degree));
     }
+    relationsButton.setToggleState(ctx.relations, juce::dontSendNotification);
+    int matched = 0;
+    for (unsigned m = ctx.matchMask; m != 0; m &= m - 1)
+        ++matched;
+    matchButton.setVisible(matched > 0);
+    matchButton.setToggleState(true, juce::dontSendNotification);
+    matchButton.setButtonText("MATCHING " + juce::String(matched) + (matched == 1 ? " NOTE  X" : " NOTES  X"));
 
-    const auto& engine = processor.getEngine();
+    const auto& engine = ctx.processor.getEngine();
     const bool audible = engine.getRoot() >= 0 && (engine.getEnvelopeLevel() > 0.002f || engine.isGateOn());
     for (auto& cell : cells)
-        cell->setLit(audible && cell->getChord().root == engine.getRoot() &&
-                     cell->getChord().shape == engine.getShape());
-    for (int i = 0; i < dsp::kNumSlots; ++i)
     {
-        strip[static_cast<std::size_t>(i)]->setSelected(i == arrange.getSelected());
-        strip[static_cast<std::size_t>(i)]->repaint();
+        cell->setLit(audible && !cell->isEmpty() && cell->getChord().root == engine.getRoot() &&
+                     cell->getChord().shape == engine.getShape());
+        cell->repaint();
     }
+    repaint();
 }
 
 void PaletteView::paint(juce::Graphics& g)
 {
-    const auto& palette = theme.palette;
+    const auto& palette = ctx.theme.palette;
     g.setColour(palette.textDim);
-    g.setFont(makeFont(9.5f, true, 0.2f));
-    g.drawText("HOME", juce::Rectangle<int>(0, 0, 40, kNavH), juce::Justification::centredLeft, false);
-
-    // Row names down the left, scale degrees (and their keys) across the top.
-    const int rowH = gridArea.getHeight() / dsp::kPaletteRows;
-    for (int row = 0; row < dsp::kPaletteRows; ++row)
-        g.drawText(dsp::paletteRowLabel(row), juce::Rectangle<int>(0, gridArea.getY() + row * rowH, kLabelW, rowH),
+    g.setFont(makeFont(9.0f, true, 0.16f));
+    const int rowH = grid.getHeight() / dsp::kCircleRows;
+    for (int row = 0; row < dsp::kCircleRows; ++row)
+        g.drawText(dsp::circleRowLabel(row), juce::Rectangle<int>(0, grid.getY() + row * rowH, kLabelW, rowH),
                    juce::Justification::centredLeft, false);
-    const int colW = (gridArea.getWidth() - kLabelW) / dsp::kPaletteColumns;
-    g.setFont(makeFont(9.0f, true, 0.1f));
-    for (int degree = 0; degree < dsp::kPaletteColumns; ++degree)
-        g.drawText("KEY " + juce::String(degree + 1),
-                   juce::Rectangle<int>(gridArea.getX() + kLabelW + degree * colW, gridArea.getY() - kDigitsH, colW,
-                                        kDigitsH - 2),
-                   juce::Justification::centred, false);
-
-    const auto top = strip.front()->getBounds();
-    g.setColour(palette.outline.withAlpha(0.6f));
-    g.drawHorizontalLine(top.getY() - kGap / 2 - 1, 0.0f, static_cast<float>(getWidth()));
+    g.setColour(palette.outline.withAlpha(0.7f));
+    g.fillRect(0, getHeight() - kBarH, getWidth(), 1);
 }
 
 void PaletteView::resized()
 {
     auto area = getLocalBounds();
-    auto nav = area.removeFromTop(kNavH);
-    nav.removeFromLeft(40);
-    keyButton.setBounds(nav.removeFromLeft(46));
-    nav.removeFromLeft(6);
-    scaleButton.setBounds(nav.removeFromLeft(136));
-    homeButton.setBounds(nav.removeFromRight(32));
-    nav.removeFromRight(6);
-    nextButton.setBounds(nav.removeFromRight(30));
-    nav.removeFromRight(6);
-    borrowButton.setBounds(nav.removeFromRight(190));
-    nav.removeFromRight(6);
-    prevButton.setBounds(nav.removeFromRight(30));
+    auto bar = area.removeFromBottom(kBarH).reduced(0, 6);
+    bar.removeFromTop(2);
+    homeButton.setBounds(bar.removeFromLeft(34));
+    bar.removeFromLeft(6);
+    prevButton.setBounds(bar.removeFromLeft(30));
+    bar.removeFromLeft(4);
+    borrowButton.setBounds(bar.removeFromLeft(150));
+    bar.removeFromLeft(4);
+    nextButton.setBounds(bar.removeFromLeft(30));
+    bar.removeFromLeft(12);
+    relationsButton.setBounds(bar.removeFromLeft(140));
+    bar.removeFromLeft(8);
+    matchButton.setBounds(bar.removeFromLeft(150));
 
-    auto stripRow = area.removeFromBottom(kStripH);
-    area.removeFromBottom(kGap + 2);
-    loopButton.setBounds(stripRow.removeFromRight(70).withSizeKeepingCentre(70, 30));
-    stripRow.removeFromRight(kGap);
-    const int stripW = (stripRow.getWidth() - kGap * (dsp::kNumSlots - 1)) / dsp::kNumSlots;
-    for (int i = 0; i < dsp::kNumSlots; ++i)
-        strip[static_cast<std::size_t>(i)]->setBounds(stripRow.getX() + i * (stripW + kGap), stripRow.getY(), stripW,
-                                                      stripRow.getHeight());
-
-    area.removeFromTop(6 + kDigitsH);
-    gridArea = area;
-    const int rowH = area.getHeight() / dsp::kPaletteRows;
-    const int colW = (area.getWidth() - kLabelW) / dsp::kPaletteColumns;
-    for (int row = 0; row < dsp::kPaletteRows; ++row)
-        for (int degree = 0; degree < dsp::kPaletteColumns; ++degree)
-            getCell(row, degree).setBounds(area.getX() + kLabelW + degree * colW, area.getY() + row * rowH, colW, rowH);
+    area.removeFromBottom(4);
+    grid = area.withTrimmedLeft(kLabelW);
+    const int rowH = grid.getHeight() / dsp::kCircleRows;
+    const int colW = grid.getWidth() / dsp::kDegrees;
+    for (int row = 0; row < dsp::kCircleRows; ++row)
+        for (int degree = 0; degree < dsp::kDegrees; ++degree)
+            getCell(row, degree).setBounds(grid.getX() + degree * colW, grid.getY() + row * rowH, colW, rowH);
 }
 } // namespace dolphinflow::ui

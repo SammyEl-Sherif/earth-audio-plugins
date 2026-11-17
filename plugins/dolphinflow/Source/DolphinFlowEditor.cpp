@@ -144,10 +144,8 @@ DolphinFlowEditor::DolphinFlowEditor(DolphinFlowProcessor& plugin)
     , octaveDown({}, theme.palette)
     , octaveUp({}, theme.palette)
     , keysTab("KEYS", theme.palette)
-    , arrangeTab("ARRANGE", theme.palette)
-    , paletteTab("PALETTE", theme.palette)
-    , arrange(plugin, theme)
-    , paletteView(plugin, theme, arrange)
+    , composeTab("COMPOSE", theme.palette)
+    , compose(plugin, theme)
 {
     setOpaque(true);
     brand.setTooltip(animalaudio::core::buildStampLong(theme.name));
@@ -220,19 +218,23 @@ DolphinFlowEditor::DolphinFlowEditor(DolphinFlowProcessor& plugin)
 
     addAndMakeVisible(brand);
 
-    keysTab.setTooltip("Play chords live, with the glide display.");
-    paletteTab.setTooltip("The chords of your key, with their numerals. Borrow from nearby keys, build a progression.");
-    arrangeTab.setTooltip("Build an 8-chord progression that loops, and copy it as a MIDI clip.");
-    for (auto* tab : {&keysTab, &paletteTab, &arrangeTab})
+    // Everything on the KEYS page, so COMPOSE can take the window.
+    for (auto* child : getChildren())
+        if (child != &brand)
+            keysPage.push_back(child);
+
+    keysTab.setTooltip("Play chords live, with the glide display and the sound.");
+    composeTab.setTooltip(
+        "Write a song: sections of chords from the palette, lead and bass in the piano roll, and drag "
+        "each part out as a MIDI clip.");
+    for (auto* tab : {&keysTab, &composeTab})
     {
         tab->setClickingTogglesState(false);
         addAndMakeVisible(*tab);
     }
     keysTab.onClick = [this] { setView(View::Keys); };
-    paletteTab.onClick = [this] { setView(View::Palette); };
-    arrangeTab.onClick = [this] { setView(View::Arrange); };
-    addChildComponent(arrange);
-    addChildComponent(paletteView);
+    composeTab.onClick = [this] { setView(View::Compose); };
+    addChildComponent(compose);
 
     // Keys must reach the editor, so clicking a control never takes keyboard focus away from it.
     for (auto* child : getChildren())
@@ -247,7 +249,7 @@ DolphinFlowEditor::DolphinFlowEditor(DolphinFlowProcessor& plugin)
 
     setSize(kWidth, kHeight);
     const int savedView = static_cast<int>(owner.apvts.state.getProperty("view", 0));
-    setView(savedView == 1 ? View::Arrange : savedView == 2 ? View::Palette : View::Keys);
+    setView(savedView == 0 ? View::Keys : View::Compose); // 1 and 2 were the old ARRANGE / PALETTE pages
     refresh();
     startTimerHz(30);
 }
@@ -288,7 +290,7 @@ void DolphinFlowEditor::stepOctave(int delta)
 
 void DolphinFlowEditor::setView(View newView)
 {
-    if (view == View::Palette && newView != View::Palette)
+    if (view == View::Compose && newView != View::Compose)
         for (int degree = 0; degree < dsp::kDegrees; ++degree)
             if (auto& code = heldDegreeCodes[static_cast<std::size_t>(degree)]; code != 0)
             {
@@ -298,20 +300,16 @@ void DolphinFlowEditor::setView(View newView)
     view = newView;
     owner.apvts.state.setProperty("view", static_cast<int>(view), nullptr);
     keysTab.setToggleState(view == View::Keys, juce::dontSendNotification);
-    paletteTab.setToggleState(view == View::Palette, juce::dontSendNotification);
-    arrangeTab.setToggleState(view == View::Arrange, juce::dontSendNotification);
-    arrange.setVisible(view == View::Arrange);
-    paletteView.setVisible(view == View::Palette);
-    if (view == View::Palette)
-        paletteView.refresh();
+    composeTab.setToggleState(view == View::Compose, juce::dontSendNotification);
+    for (auto* c : keysPage)
+        c->setVisible(view == View::Keys);
+    compose.setVisible(view == View::Compose);
+    if (view == View::Compose)
+        compose.refresh();
     repaint();
 }
 
-void DolphinFlowEditor::rootPlayed(int pitchClass)
-{
-    if (view == View::Arrange)
-        arrange.writeSelected(pitchClass, juce::roundToInt(owner.getParameterValue(ids::chord)));
-}
+void DolphinFlowEditor::rootPlayed(int) {}
 
 void DolphinFlowEditor::playDegree(int degree, int keyCode)
 {
@@ -334,6 +332,8 @@ void DolphinFlowEditor::releaseHeldKeys()
 bool DolphinFlowEditor::keyPressed(const juce::KeyPress& key)
 {
     const auto mods = key.getModifiers();
+    if (view == View::Compose && compose.handleKey(key))
+        return true;
     if (mods.isCommandDown() || mods.isCtrlDown() || mods.isAltDown())
         return false; // leave host shortcuts alone
 
@@ -350,17 +350,12 @@ bool DolphinFlowEditor::keyPressed(const juce::KeyPress& key)
             }
             return true;
         }
-    if (view == View::Palette)
+    if (view == View::Compose)
     {
-        // Number keys play the scale's own chords; left / right borrow round the circle of fifths.
+        // Number keys play the scale's own chords.
         if (c >= '1' && c < '1' + dsp::kDegrees)
         {
             playDegree(static_cast<int>(c - '1'), key.getKeyCode());
-            return true;
-        }
-        if (key == juce::KeyPress::leftKey || key == juce::KeyPress::rightKey)
-        {
-            paletteView.borrow(key == juce::KeyPress::leftKey ? -1 : 1);
             return true;
         }
     }
@@ -374,20 +369,6 @@ bool DolphinFlowEditor::keyPressed(const juce::KeyPress& key)
     {
         stepOctave(c == 'z' ? -1 : 1);
         return true;
-    }
-    if (view == View::Arrange)
-    {
-        if (key == juce::KeyPress::backspaceKey || key == juce::KeyPress::deleteKey)
-        {
-            arrange.clearSelected();
-            return true;
-        }
-        if (key == juce::KeyPress::leftKey || key == juce::KeyPress::rightKey)
-        {
-            const int step = key == juce::KeyPress::leftKey ? dsp::kNumSlots - 1 : 1;
-            arrange.select((std::max(0, arrange.getSelected()) + step) % dsp::kNumSlots);
-            return true;
-        }
     }
     if (c == 'l')
     {
@@ -473,10 +454,12 @@ void DolphinFlowEditor::refresh()
         rootKeys[static_cast<std::size_t>(pc)]->setLit(audible && pc == root);
         rootKeys[static_cast<std::size_t>(pc)]->setKeyInfo((home >> pc) & 1u, pc == key.homeTonic);
     }
-    if (view == View::Arrange)
-        arrange.refresh();
-    else if (view == View::Palette)
-        paletteView.refresh();
+    if (view == View::Compose)
+    {
+        compose.refresh();
+        repaint(0, 0, getWidth(), static_cast<int>(kHeaderH)); // the header's chord readout
+        return;
+    }
     repaint();
 }
 
@@ -714,35 +697,10 @@ void DolphinFlowEditor::paint(juce::Graphics& g)
     g.fillAll(palette.background);
     paintHeader(g);
 
-    if (view == View::Palette)
-    {
-        const auto key = owner.getPaletteKey();
-        paintPanel(g, kDisplay, "CHORD PALETTE",
-                   key.isHome() ? juce::String("HOLD TO PLAY  /  DRAG TO A SQUARE  /  KEYS 1-7")
-                                : "BORROWING  /  HOLLOW = OUTSIDE " +
-                                      juce::String(dsp::pitchClassName(
-                                          key.homeTonic, dsp::prefersFlats(key.homeTonic, key.homeScale))) +
-                                      " " + dsp::scaleAt(key.homeScale).label);
-    }
-    else if (view == View::Arrange)
-    {
-        double beats = 0.0;
-        for (int i = 0; i < dsp::kNumSlots; ++i)
-            if (const auto slot = owner.getSlot(i); !slot.isEmpty())
-                beats += slot.beats();
-        const auto bars = beats / 4.0;
-        auto amount = juce::String(bars, 2);
-        while (amount.containsChar('.') && (amount.endsWithChar('0') || amount.endsWithChar('.')))
-            amount = amount.dropLastCharacters(1);
-        const auto length = amount + (amount == "1" ? " BAR" : " BARS");
-        paintPanel(g, kDisplay, "ARRANGE",
-                   length + " LOOP  /  " + juce::String(juce::roundToInt(owner.getTempo())) + " BPM");
-    }
-    else
-    {
-        paintPanel(g, kDisplay, "GLIDE", owner.apvts.getParameter(ids::glide.getParamID())->getCurrentValueAsText());
-        paintRibbons(g, kDisplay);
-    }
+    if (view == View::Compose)
+        return; // COMPOSE draws its own panels
+    paintPanel(g, kDisplay, "GLIDE", owner.apvts.getParameter(ids::glide.getParamID())->getCurrentValueAsText());
+    paintRibbons(g, kDisplay);
     paintPanel(g, kKnobPanel, "SOUND", {});
     paintKnobLabels(g);
     paintPanel(g, kKeysPanel, "ROOT", "COMPUTER KEYS  A W S E D F T G Y H U J");
@@ -764,12 +722,9 @@ void DolphinFlowEditor::paint(juce::Graphics& g)
 void DolphinFlowEditor::resized()
 {
     brand.setBounds(getWidth() - 20 - 150, 27, 150, 18);
-    keysTab.setBounds(672, 22, 62, 28);
-    paletteTab.setBounds(740, 22, 86, 28);
-    arrangeTab.setBounds(832, 22, 78, 28);
-    const auto display = kDisplay.toNearestInt().reduced(14, 0).withTrimmedTop(32).withTrimmedBottom(12);
-    arrange.setBounds(display);
-    paletteView.setBounds(display);
+    keysTab.setBounds(740, 22, 62, 28);
+    composeTab.setBounds(808, 22, 92, 28);
+    compose.setBounds(0, static_cast<int>(kHeaderH), getWidth(), getHeight() - static_cast<int>(kHeaderH));
 
     const auto knobArea = kKnobPanel.toNearestInt().withTrimmedTop(32).reduced(10, 4);
     const int cellW = knobArea.getWidth() / kKnobColumns;

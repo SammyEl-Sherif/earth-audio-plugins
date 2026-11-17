@@ -1,9 +1,8 @@
 #pragma once
 
 #include "DolphinFlowProcessor.h"
-#include "ui/ArrangeView.h"
 #include "ui/DolphinFlowTheme.h"
-#include "ui/PaletteView.h"
+#include "ui/ComposeView.h"
 
 #include <animalaudio/ui/BrandBadge.h>
 #include <animalaudio/ui/ChoicePillRow.h>
@@ -74,17 +73,14 @@ public:
     juce::Button& getOctaveDownButton() noexcept { return octaveDown; }
     juce::Button& getOctaveUpButton() noexcept { return octaveUp; }
     RootKey& getRootKey(int pitchClass) noexcept { return *rootKeys[static_cast<std::size_t>(pitchClass)]; }
-    ui::ArrangeView& getArrangeView() noexcept { return arrange; }
     juce::Button& getKeysTab() noexcept { return keysTab; }
-    juce::Button& getArrangeTab() noexcept { return arrangeTab; }
-    juce::Button& getPaletteTab() noexcept { return paletteTab; }
-    ui::PaletteView& getPaletteView() noexcept { return paletteView; }
+    juce::Button& getComposeTab() noexcept { return composeTab; }
+    ui::ComposeView& getComposeView() noexcept { return compose; }
 
     enum class View
     {
         Keys = 0,
-        Arrange,
-        Palette
+        Compose
     };
     View getView() const noexcept { return view; }
     void setView(View newView);
@@ -131,10 +127,9 @@ private:
     std::unique_ptr<juce::ButtonParameterAttachment> mpeAttachment;
     std::array<std::unique_ptr<RootKey>, 12> rootKeys;
     animalaudio::ui::PillButton keysTab;
-    animalaudio::ui::PillButton arrangeTab;
-    animalaudio::ui::PillButton paletteTab;
-    ui::ArrangeView arrange;
-    ui::PaletteView paletteView;
+    animalaudio::ui::PillButton composeTab;
+    ui::ComposeView compose;
+    std::vector<juce::Component*> keysPage; // hidden while COMPOSE fills the window
     View view = View::Keys;
 
     std::array<int, 12> heldKeyCodes{};               // computer key held for each root, 0 when up
